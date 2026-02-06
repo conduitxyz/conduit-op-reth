@@ -1,0 +1,44 @@
+[package]
+name = "conduit-op-reth-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+reth-optimism-chainspec = { workspace = true, features = ["superchain-configs"] }
+reth-optimism-forks.workspace = true
+reth-optimism-evm.workspace = true
+reth-optimism-primitives.workspace = true
+reth-optimism-node.workspace = true
+reth-optimism-payload-builder.workspace = true
+reth-optimism-rpc.workspace = true
+reth-chainspec.workspace = true
+reth-cli.workspace = true
+reth-evm.workspace = true
+reth-node-builder.workspace = true
+reth-primitives-traits.workspace = true
+reth-engine-local.workspace = true
+reth-node-api.workspace = true
+reth-network-peers.workspace = true
+
+alloy-primitives.workspace = true
+alloy-genesis.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-evm.workspace = true
+alloy-op-evm.workspace = true
+alloy-rpc-types-eth.workspace = true
+op-alloy-consensus.workspace = true
+op-alloy-rpc-types-engine.workspace = true
+
+revm.workspace = true
+op-revm.workspace = true
+
+clap.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reth-storage-errors.workspace = true
+
+eyre.workspace = true

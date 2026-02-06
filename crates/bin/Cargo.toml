@@ -1,0 +1,23 @@
+[package]
+name = "conduit-op-reth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "conduit-op-reth"
+path = "src/main.rs"
+
+[dependencies]
+conduit-op-reth-node.workspace = true
+
+reth-ethereum-cli.workspace = true
+reth-optimism-consensus.workspace = true
+reth-optimism-node.workspace = true
+reth-node-builder = { workspace = true, features = ["op"] }
+reth-db.workspace = true
+reth-cli-util.workspace = true
+
+clap.workspace = true
+tracing.workspace = true

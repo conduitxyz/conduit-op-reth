@@ -1,0 +1,85 @@
+name: Docker Build
+
+permissions:
+  contents: write
+  id-token: write
+  issues: write
+  pull-requests: write
+
+on:
+  workflow_call:
+    inputs:
+      STAGE_REGISTRY:
+        required: false
+        type: string
+        default: us-docker.pkg.dev/exfac-staging/conduit
+      PROD_REGISTRY:
+        required: false
+        type: string
+        default: us-docker.pkg.dev/optimum-sound-359720/conduit
+      IMAGE_NAME:
+        required: true
+        type: string
+      target:
+        required: false
+        type: string
+      workdir:
+        required: false
+        type: string
+        default: ./
+  workflow_dispatch:
+    inputs:
+      STAGE_REGISTRY:
+        required: false
+        type: string
+        default: us-docker.pkg.dev/exfac-staging/conduit
+      PROD_REGISTRY:
+        required: false
+        type: string
+        default: us-docker.pkg.dev/optimum-sound-359720/conduit
+      IMAGE_NAME:
+        required: true
+        type: string
+      target:
+        required: false
+        type: string
+      workdir:
+        required: false
+        type: string
+        default: ./
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest-16core
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: conduitxyz/docker-builds-action@v3
+        id: docker-build
+        with:
+          STAGE_REGISTRY: ${{ inputs.STAGE_REGISTRY }}
+          PROD_REGISTRY: ${{ inputs.PROD_REGISTRY }}
+          IMAGE_NAME: ${{ inputs.IMAGE_NAME }}
+          target: ${{ inputs.target }}
+          workdir: ${{ inputs.workdir }}
+
+      - name: Verify Docker image runs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          STAGE_REGISTRY: ${{ inputs.STAGE_REGISTRY }}
+          IMAGE_NAME: ${{ inputs.IMAGE_NAME }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            TAG="pr-${PR_NUMBER}-latest"
+          else
+            TAG="latest"
+          fi
+          IMAGE="${STAGE_REGISTRY}/${IMAGE_NAME}:${TAG}"
+          echo "Pulling and testing image: $IMAGE"
+          docker pull "$IMAGE"
+          docker run --rm "$IMAGE" --version
+          echo "Docker image run check passed!"
