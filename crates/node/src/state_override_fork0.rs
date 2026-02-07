@@ -18,6 +18,11 @@ use revm::DatabaseCommit;
 /// Each update entry can set `code` (bytecode) and/or `storage` slots on a target address.
 /// Existing account balance and nonce are preserved.
 ///
+/// **Important**: Storage overrides on an address that has no code (and no balance/nonce) will
+/// be silently discarded by EIP-161 state clear when committed to `State<DB>`. Always pair
+/// storage overrides with a `code` field, or target an address that already has a non-empty
+/// account (balance, nonce, or code).
+///
 /// Uses the OP Stack 2-second block time heuristic (matching Canyon's `ensure_create2_deployer`)
 /// to detect the transition block without requiring the parent block's timestamp.
 pub(crate) fn ensure_state_override_fork0<DB>(
@@ -127,6 +132,20 @@ mod tests {
         updates.insert(
             Address::with_last_byte(0x99),
             StateOverrideAccount {
+                code: Some(Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52])),
+                storage: Some(storage),
+            },
+        );
+        StateOverrideFork0Config { updates }
+    }
+
+    fn storage_only_config() -> StateOverrideFork0Config {
+        let mut storage = BTreeMap::new();
+        storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xff));
+        let mut updates = HashMap::default();
+        updates.insert(
+            Address::with_last_byte(0x99),
+            StateOverrideAccount {
                 code: None,
                 storage: Some(storage),
             },
@@ -162,7 +181,7 @@ mod tests {
         updates.insert(
             Address::with_last_byte(0x99),
             StateOverrideAccount {
-                code: None,
+                code: Some(Bytes::from_static(&[0x60, 0x80])),
                 storage: Some(storage),
             },
         );
@@ -193,6 +212,8 @@ mod tests {
         ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x99);
+        let info = db.basic_ref(addr).unwrap().expect("account should exist");
+        assert!(info.code.is_some(), "code should be set alongside storage");
         let slot1 = db.storage_ref(addr, U256::from(0x01)).unwrap();
         assert_eq!(slot1, U256::from(0xff));
         let slot2 = db.storage_ref(addr, U256::from(0x02)).unwrap();
@@ -285,6 +306,28 @@ mod tests {
             .expect("account should exist");
         assert_eq!(info.balance, alloy_primitives::U256::from(100));
         assert_eq!(info.nonce, 5);
+    }
+
+    /// Storage overrides on an empty account (no code, balance, or nonce) are silently
+    /// discarded by EIP-161 state clear when committed to `State<DB>`. Always pair
+    /// storage overrides with code.
+    #[test]
+    fn storage_only_on_empty_account_is_discarded_by_eip161() {
+        use revm::database::State;
+        use revm::Database as _;
+
+        let spec = MockSpec { fork_time: Some(1000) };
+        let config = storage_only_config();
+        let inner = InMemoryDB::default();
+        let mut db = State::builder().with_database(inner).with_bundle_update().build();
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+
+        db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
+
+        let addr = Address::with_last_byte(0x99);
+        let slot = db.storage(addr, U256::from(0x01)).unwrap();
+        assert_eq!(slot, U256::ZERO, "storage-only override on empty account should be discarded by EIP-161 state clear");
     }
 
     #[test]
