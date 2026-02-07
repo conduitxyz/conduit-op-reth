@@ -1,5 +1,5 @@
 use alloy_eips::Encodable2718;
-use alloy_primitives::{address, b256, Address, Bytes, TxKind, B256, B64};
+use alloy_primitives::{Address, B64, B256, Bytes, TxKind, address, b256};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_signer_local::PrivateKeySigner;
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
@@ -79,8 +79,9 @@ pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
     };
 
     // Decode the L1 block info deposit tx from the raw constant.
-    let l1_info_raw =
-        Bytes::from_static(&reth_optimism_chainspec::constants::TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056);
+    let l1_info_raw = Bytes::from_static(
+        &reth_optimism_chainspec::constants::TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056,
+    );
     let l1_info_tx = T::decode_2718(&mut l1_info_raw.as_ref())
         .expect("failed to decode L1 block info deposit tx");
 
@@ -112,7 +113,9 @@ pub fn build_genesis_with_override(
 
     if let Some(alloc) = extra_alloc {
         if let serde_json::Value::Object(map) = alloc {
-            let alloc_obj = genesis["alloc"].as_object_mut().expect("alloc should be object");
+            let alloc_obj = genesis["alloc"]
+                .as_object_mut()
+                .expect("alloc should be object");
             for (k, v) in map {
                 alloc_obj.insert(k, v);
             }
@@ -134,8 +137,8 @@ pub fn parse_chain_spec(genesis_json: &str) -> Arc<ConduitOpChainSpec> {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("genesis.json");
     std::fs::write(&path, genesis_json).unwrap();
-    let spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap())
-        .expect("failed to parse genesis");
+    let spec =
+        ConduitOpChainSpecParser::parse(path.to_str().unwrap()).expect("failed to parse genesis");
     std::fs::remove_dir_all(&dir).ok();
     spec
 }
@@ -160,7 +163,10 @@ macro_rules! launch_test_node {
             .with_disabled_discovery()
             .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
 
-        let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
+        let NodeHandle {
+            node,
+            node_exit_future: _,
+        } = NodeBuilder::new(node_config)
             .testing_node(tasks.executor())
             .node(conduit_op_reth_node::node::ConduitOpNode::default())
             .launch()
@@ -177,11 +183,7 @@ pub(crate) use launch_test_node;
 ///
 /// Reth's `TransactionTestContext::deploy_tx()` uses `TxKind::Call` internally, so we
 /// construct the `TransactionRequest` manually with `TxKind::Create`.
-pub async fn create_deploy_tx(
-    chain_id: u64,
-    init_code: Bytes,
-    wallet: PrivateKeySigner,
-) -> Bytes {
+pub async fn create_deploy_tx(chain_id: u64, init_code: Bytes, wallet: PrivateKeySigner) -> Bytes {
     let tx = TransactionRequest {
         nonce: Some(0),
         chain_id: Some(chain_id),
@@ -189,7 +191,10 @@ pub async fn create_deploy_tx(
         max_fee_per_gas: Some(20_000_000_000u128),
         max_priority_fee_per_gas: Some(1_000_000_000u128),
         to: Some(TxKind::Create),
-        input: TransactionInput { input: None, data: Some(init_code) },
+        input: TransactionInput {
+            input: None,
+            data: Some(init_code),
+        },
         ..Default::default()
     };
     let signed = TransactionTestContext::sign_tx(wallet, tx).await;

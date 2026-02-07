@@ -1,13 +1,13 @@
 use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks};
 use alloy_consensus::Header;
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, Bytes, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use reth_chainspec::{
     Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
     ForkFilter, ForkId, Hardfork, Hardforks, Head,
 };
 use reth_cli::chainspec::{ChainSpecParser, parse_genesis};
-use reth_optimism_chainspec::{OpChainSpec, generated_chain_value_parser, SUPPORTED_CHAINS};
+use reth_optimism_chainspec::{OpChainSpec, SUPPORTED_CHAINS, generated_chain_value_parser};
 use reth_optimism_forks::{OpHardfork, OpHardforks};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -56,17 +56,11 @@ impl EthChainSpec for ConduitOpChainSpec {
         self.inner.chain()
     }
 
-    fn base_fee_params_at_timestamp(
-        &self,
-        timestamp: u64,
-    ) -> alloy_eips::eip1559::BaseFeeParams {
+    fn base_fee_params_at_timestamp(&self, timestamp: u64) -> alloy_eips::eip1559::BaseFeeParams {
         self.inner.base_fee_params_at_timestamp(timestamp)
     }
 
-    fn blob_params_at_timestamp(
-        &self,
-        timestamp: u64,
-    ) -> Option<alloy_eips::eip7840::BlobParams> {
+    fn blob_params_at_timestamp(&self, timestamp: u64) -> Option<alloy_eips::eip7840::BlobParams> {
         self.inner.blob_params_at_timestamp(timestamp)
     }
 
@@ -86,9 +80,8 @@ impl EthChainSpec for ConduitOpChainSpec {
         let inner = self.inner.display_hardforks().to_string();
         let conduit = match &self.state_override_fork0 {
             Some(config) => {
-                let activation = self.conduit_op_fork_activation(
-                    ConduitOpHardfork::StateOverrideFork0,
-                );
+                let activation =
+                    self.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0);
                 format!(
                     "\nConduit StateOverrideFork0: {activation:?}, updates={}",
                     config.updates.len()
@@ -227,7 +220,9 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
                 ConduitOpHardfork::StateOverrideFork0,
                 ForkCondition::Timestamp(raw.time),
             );
-            StateOverrideFork0Config { updates: raw.updates }
+            StateOverrideFork0Config {
+                updates: raw.updates,
+            }
         });
 
         Ok(Arc::new(ConduitOpChainSpec {
@@ -301,7 +296,11 @@ mod tests {
     }
 
     fn head_at(timestamp: u64) -> Head {
-        Head { number: 0, timestamp, ..Default::default() }
+        Head {
+            number: 0,
+            timestamp,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -334,23 +333,36 @@ mod tests {
         });
         let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
 
-        let config = spec.state_override_fork0.as_ref().expect("should have conduit config");
+        let config = spec
+            .state_override_fork0
+            .as_ref()
+            .expect("should have conduit config");
         assert_eq!(config.updates.len(), 2);
 
         assert_eq!(
             spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
             ForkCondition::Timestamp(1234567890),
         );
-        assert!(spec.op_fork_activation(OpHardfork::Bedrock).active_at_block(0));
+        assert!(
+            spec.op_fork_activation(OpHardfork::Bedrock)
+                .active_at_block(0)
+        );
 
-        let addr0: Address = "0x4200000000000000000000000000000000000042".parse().unwrap();
+        let addr0: Address = "0x4200000000000000000000000000000000000042"
+            .parse()
+            .unwrap();
         assert_eq!(
             config.updates[&addr0].code.as_ref().unwrap(),
             &alloy_primitives::Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52]),
         );
 
-        let addr1: Address = "0x4200000000000000000000000000000000000099".parse().unwrap();
-        let storage = config.updates[&addr1].storage.as_ref().expect("should have storage");
+        let addr1: Address = "0x4200000000000000000000000000000000000099"
+            .parse()
+            .unwrap();
+        let storage = config.updates[&addr1]
+            .storage
+            .as_ref()
+            .expect("should have storage");
         let slot_key: alloy_primitives::B256 =
             "0x0000000000000000000000000000000000000000000000000000000000000001"
                 .parse()
@@ -405,8 +417,20 @@ mod tests {
 
         // All OP forks at genesis → single stable hash, no next fork.
         let base_hash = ForkHash([0x8b, 0x51, 0xa7, 0xf5]);
-        assert_eq!(conduit_spec.fork_id(&head_at(0)), ForkId { hash: base_hash, next: 0 });
-        assert_eq!(conduit_spec.latest_fork_id(), ForkId { hash: base_hash, next: 0 });
+        assert_eq!(
+            conduit_spec.fork_id(&head_at(0)),
+            ForkId {
+                hash: base_hash,
+                next: 0
+            }
+        );
+        assert_eq!(
+            conduit_spec.latest_fork_id(),
+            ForkId {
+                hash: base_hash,
+                next: 0
+            }
+        );
     }
 
     #[test]
@@ -419,29 +443,63 @@ mod tests {
         let post_fork_hash = ForkHash([0xd3, 0xcd, 0x38, 0xf6]);
 
         // Before activation: same base hash, next points to custom fork.
-        assert_eq!(spec.fork_id(&head_at(0)), ForkId { hash: base_hash, next: 5000 });
-        assert_eq!(spec.fork_id(&head_at(4999)), ForkId { hash: base_hash, next: 5000 });
+        assert_eq!(
+            spec.fork_id(&head_at(0)),
+            ForkId {
+                hash: base_hash,
+                next: 5000
+            }
+        );
+        assert_eq!(
+            spec.fork_id(&head_at(4999)),
+            ForkId {
+                hash: base_hash,
+                next: 5000
+            }
+        );
 
         // At activation: hash changes, no further forks.
-        assert_eq!(spec.fork_id(&head_at(5000)), ForkId { hash: post_fork_hash, next: 0 });
-        assert_eq!(spec.fork_id(&head_at(10000)), ForkId { hash: post_fork_hash, next: 0 });
+        assert_eq!(
+            spec.fork_id(&head_at(5000)),
+            ForkId {
+                hash: post_fork_hash,
+                next: 0
+            }
+        );
+        assert_eq!(
+            spec.fork_id(&head_at(10000)),
+            ForkId {
+                hash: post_fork_hash,
+                next: 0
+            }
+        );
 
-        assert_eq!(spec.latest_fork_id(), ForkId { hash: post_fork_hash, next: 0 });
+        assert_eq!(
+            spec.latest_fork_id(),
+            ForkId {
+                hash: post_fork_hash,
+                next: 0
+            }
+        );
 
         // fork_filter.current() must agree with fork_id() at each stage.
-        assert_eq!(spec.fork_filter(head_at(0)).current(), spec.fork_id(&head_at(0)));
-        assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
+        assert_eq!(
+            spec.fork_filter(head_at(0)).current(),
+            spec.fork_id(&head_at(0))
+        );
+        assert_eq!(
+            spec.fork_filter(head_at(5000)).current(),
+            spec.fork_id(&head_at(5000))
+        );
     }
 
     /// Regression test: parse the saigon genesis fixture (used by e2e tests)
     /// with a conduit section injected, exactly as `build_genesis_with_override` does.
     #[test]
     fn parse_saigon_genesis_with_conduit_config() {
-        const SAIGON_GENESIS: &str =
-            include_str!("../../../tests/fixtures/saigon-genesis.json");
+        const SAIGON_GENESIS: &str = include_str!("../../../tests/fixtures/saigon-genesis.json");
 
-        let mut genesis: serde_json::Value =
-            serde_json::from_str(SAIGON_GENESIS).unwrap();
+        let mut genesis: serde_json::Value = serde_json::from_str(SAIGON_GENESIS).unwrap();
         genesis["config"]["conduit"] = serde_json::json!({
             "stateOverrideFork0": {
                 "time": 1710338137,
@@ -465,5 +523,4 @@ mod tests {
         let config = spec.state_override_fork0.as_ref().unwrap();
         assert_eq!(config.updates.len(), 1);
     }
-
 }
