@@ -133,6 +133,7 @@ macro_rules! launch_test_node {
         let tasks = TaskManager::current();
         let node_config = NodeConfig::new($chain_spec)
             .with_unused_ports()
+            .with_disabled_discovery()
             .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
 
         let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
