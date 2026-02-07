@@ -24,10 +24,28 @@ jobs:
     outputs:
       VERSION: ${{ steps.extract_version.outputs.VERSION }}
 
+  check-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    needs: extract-version
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify crate version matches tag
+        run: |
+          tag="${{ needs.extract-version.outputs.VERSION }}"
+          tag="${tag#v}"
+          cargo_ver=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "conduit-op-reth") | .version')
+          if [[ "$tag" != "$cargo_ver"* ]]; then
+            echo "::error::Tag v${tag} doesn't match Cargo.toml version ${cargo_ver}"
+            exit 1
+          fi
+          echo "Tag v${tag} matches Cargo.toml version ${cargo_ver}"
+
   docker:
     name: Build and push Docker image
     runs-on: ubuntu-latest-16core
-    needs: extract-version
+    needs: [extract-version, check-version]
     env:
       VERSION: ${{ needs.extract-version.outputs.VERSION }}
     steps:
