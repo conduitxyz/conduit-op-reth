@@ -220,8 +220,16 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
 
     // Deploy the contract in block 1 (before fork activation).
     let raw_tx = create_deploy_tx(chain_spec.chain_id(), init_code, deployer_key).await;
-    ctx.rpc.inject_tx(raw_tx).await?;
-    ctx.advance_block().await?;
+    let tx_hash = ctx.rpc.inject_tx(raw_tx).await?;
+    let payload = ctx.advance_block().await?;
+
+    // Verify the deploy tx was included in the block.
+    let included = payload
+        .block()
+        .body()
+        .transactions()
+        .any(|tx| *tx.tx_hash() == tx_hash);
+    assert!(included, "deploy tx {tx_hash} should be included in block");
 
     // Verify the contract was deployed with original code.
     let state = ctx.inner.provider.latest()?;
