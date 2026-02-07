@@ -1,7 +1,7 @@
 use crate::e2e::{
     FORK_ACTIVATION_TIMESTAMP, OverrideTestV1, OverrideTestV2, PREFUND_BALANCE, STORAGE_ADDRESS,
-    STORAGE_SLOT, STORAGE_SLOT_2, TARGET_ADDRESS, TARGET_BYTECODE, build_genesis_with_override,
-    create_deploy_tx, launch_test_node, parse_chain_spec,
+    STORAGE_SLOT, STORAGE_SLOT_2, TARGET_ADDRESS, TARGET_BYTECODE, advance_and_wait,
+    build_genesis_with_override, create_deploy_tx, launch_test_node, parse_chain_spec,
 };
 use alloy_primitives::{Bytes, TxKind, U256, address};
 use alloy_rpc_types_eth::{TransactionRequest, state::EvmOverrides};
@@ -28,13 +28,13 @@ async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()
     let (_tasks, mut ctx) = launch_test_node!(chain_spec);
 
     // Block at t=2: fork not yet active.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&TARGET_ADDRESS)?;
     assert!(code.is_none(), "should have no code before activation");
 
     // Block at t=4: fork activates (transition block).
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let code = state
         .account_code(&TARGET_ADDRESS)?
@@ -46,7 +46,7 @@ async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()
     );
 
     // Block at t=6: post-activation, bytecode persists.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let code = state
         .account_code(&TARGET_ADDRESS)?
@@ -80,7 +80,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     let (_tasks, mut ctx) = launch_test_node!(chain_spec);
 
     // Block at t=2: fork not yet active.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&STORAGE_ADDRESS)?;
     assert!(code.is_none(), "should have no code before activation");
@@ -88,7 +88,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     assert_eq!(value, None, "storage should be empty before activation");
 
     // Block at t=4: fork activates.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&STORAGE_ADDRESS)?;
     assert!(code.is_some(), "should have code at activation");
@@ -100,7 +100,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     );
 
     // Block at t=6: post-activation, storage persists.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?;
     assert_eq!(
@@ -134,7 +134,7 @@ async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
     let expected_balance = U256::from_str_radix("de0b6b3a7640000", 16).unwrap();
 
     // Pre-activation: balance should be set from genesis alloc.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let account = state
         .basic_account(&TARGET_ADDRESS)?
@@ -145,7 +145,7 @@ async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
     );
 
     // Activation: bytecode applied, balance preserved.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let account = state
         .basic_account(&TARGET_ADDRESS)?
@@ -221,7 +221,7 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     // Deploy the contract in block 1 (before fork activation).
     let raw_tx = create_deploy_tx(chain_spec.chain_id(), init_code, deployer_key).await;
     let tx_hash = ctx.rpc.inject_tx(raw_tx).await?;
-    let payload = ctx.advance_block().await?;
+    let payload = advance_and_wait!(ctx);
 
     // Verify the deploy tx was included in the block.
     let included = payload
@@ -243,7 +243,7 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     );
 
     // Block 2: fork activates — code and storage should be overridden.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let code = state
         .account_code(&contract_addr)?
@@ -267,7 +267,7 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     );
 
     // Block 3: post-activation, values persist.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     let code = state
         .account_code(&contract_addr)?
@@ -326,7 +326,7 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
     };
 
     // Block 1: before fork activation — V1 is deployed, getValue() should return 42.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let result = EthCall::call(
         ctx.rpc.inner.eth_api(),
         call_request.clone().into(),
@@ -342,7 +342,7 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
     );
 
     // Block 2: fork activates — V2 bytecode is injected, getValue() should return 99.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let result = EthCall::call(
         ctx.rpc.inner.eth_api(),
         call_request.clone().into(),
@@ -358,7 +358,7 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
     );
 
     // Block 3: post-activation — still V2.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let result = EthCall::call(
         ctx.rpc.inner.eth_api(),
         call_request.into(),
@@ -407,7 +407,7 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
     let (_tasks, mut ctx) = launch_test_node!(chain_spec);
 
     // Block 1: before fork — neither address should have code.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
     assert!(
         state.account_code(&addr_a)?.is_none(),
@@ -424,7 +424,7 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
     );
 
     // Block 2: fork activates — both addresses should be overridden.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
 
     let code_a = state
@@ -452,7 +452,7 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
     );
 
     // Block 3: post-activation — both persist.
-    ctx.advance_block().await?;
+    advance_and_wait!(ctx);
     let state = ctx.inner.provider.latest()?;
 
     let code_a = state

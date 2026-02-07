@@ -177,6 +177,25 @@ macro_rules! launch_test_node {
 
 pub(crate) use launch_test_node;
 
+/// Advance one block and wait for it to be fully committed.
+///
+/// `advance_block()` builds a payload, submits it via `new_payload`, and sends a
+/// `forkchoice_updated`, but the pipeline may not have finished processing when it
+/// returns. This macro calls `wait_block` (with `wait_finish_checkpoint=true`) so
+/// that `provider.latest()` is guaranteed to reflect the new block's state.
+macro_rules! advance_and_wait {
+    ($ctx:expr) => {{
+        use alloy_consensus::BlockHeader as _;
+        let payload = $ctx.advance_block().await?;
+        let number = payload.block().number();
+        let hash = payload.block().hash();
+        $ctx.wait_block(number, hash, true).await?;
+        payload
+    }};
+}
+
+pub(crate) use advance_and_wait;
+
 /// Build a signed CREATE transaction and return the raw RLP-encoded bytes.
 ///
 /// Reth's `TransactionTestContext::deploy_tx()` uses `TxKind::Call` internally, so we
