@@ -21,6 +21,10 @@ pub const STORAGE_ADDRESS: Address = address!("420000000000000000000000000000000
 pub const STORAGE_SLOT: B256 =
     b256!("0000000000000000000000000000000000000000000000000000000000000001");
 
+/// Second storage slot key.
+pub const STORAGE_SLOT_2: B256 =
+    b256!("0000000000000000000000000000000000000000000000000000000000000002");
+
 /// Initial timestamp used by the PayloadTestContext (hardcoded in reth-e2e-test-utils).
 /// Each advance_block() increments by 1.
 const INITIAL_PAYLOAD_TIMESTAMP: u64 = 1710338135;

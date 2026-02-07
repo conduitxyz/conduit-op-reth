@@ -124,21 +124,6 @@ mod tests {
         StateOverrideFork0Config { updates }
     }
 
-    fn storage_config() -> StateOverrideFork0Config {
-        let mut storage = BTreeMap::new();
-        storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xff));
-        storage.insert(B256::with_last_byte(0x02), B256::with_last_byte(0x42));
-        let mut updates = HashMap::default();
-        updates.insert(
-            Address::with_last_byte(0x99),
-            StateOverrideAccount {
-                code: Some(Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52])),
-                storage: Some(storage),
-            },
-        );
-        StateOverrideFork0Config { updates }
-    }
-
     fn storage_only_config() -> StateOverrideFork0Config {
         let mut storage = BTreeMap::new();
         storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xff));
@@ -167,27 +152,6 @@ mod tests {
         StateOverrideFork0Config { updates }
     }
 
-    fn multi_config() -> StateOverrideFork0Config {
-        let mut updates = HashMap::default();
-        updates.insert(
-            Address::with_last_byte(0x42),
-            StateOverrideAccount {
-                code: Some(Bytes::from_static(&[0x60, 0x80])),
-                storage: None,
-            },
-        );
-        let mut storage = BTreeMap::new();
-        storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xff));
-        updates.insert(
-            Address::with_last_byte(0x99),
-            StateOverrideAccount {
-                code: Some(Bytes::from_static(&[0x60, 0x80])),
-                storage: Some(storage),
-            },
-        );
-        StateOverrideFork0Config { updates }
-    }
-
     #[test]
     fn injects_bytecode_at_transition_block() {
         let spec = MockSpec { fork_time: Some(1000) };
@@ -201,23 +165,6 @@ mod tests {
         let bytecode = config.updates[&addr].code.as_ref().unwrap();
         assert_eq!(info.code_hash, alloy_primitives::keccak256(bytecode));
         assert_eq!(info.code.unwrap().original_bytes(), *bytecode);
-    }
-
-    #[test]
-    fn sets_storage_at_transition_block() {
-        let spec = MockSpec { fork_time: Some(1000) };
-        let config = storage_config();
-        let mut db = InMemoryDB::default();
-
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
-
-        let addr = Address::with_last_byte(0x99);
-        let info = db.basic_ref(addr).unwrap().expect("account should exist");
-        assert!(info.code.is_some(), "code should be set alongside storage");
-        let slot1 = db.storage_ref(addr, U256::from(0x01)).unwrap();
-        assert_eq!(slot1, U256::from(0xff));
-        let slot2 = db.storage_ref(addr, U256::from(0x02)).unwrap();
-        assert_eq!(slot2, U256::from(0x42));
     }
 
     #[test]
@@ -235,28 +182,6 @@ mod tests {
 
         let slot = db.storage_ref(addr, U256::from(0x01)).unwrap();
         assert_eq!(slot, U256::from(0xaa));
-    }
-
-    #[test]
-    fn applies_multiple_updates() {
-        let spec = MockSpec { fork_time: Some(1000) };
-        let config = multi_config();
-        let mut db = InMemoryDB::default();
-
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
-
-        // Bytecode on 0x42.
-        let info = db
-            .basic_ref(Address::with_last_byte(0x42))
-            .unwrap()
-            .expect("account should exist");
-        assert!(info.code.is_some());
-
-        // Storage on 0x99.
-        let slot = db
-            .storage_ref(Address::with_last_byte(0x99), U256::from(0x01))
-            .unwrap();
-        assert_eq!(slot, U256::from(0xff));
     }
 
     #[test]
