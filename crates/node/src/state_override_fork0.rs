@@ -8,10 +8,10 @@ use crate::chainspec::StateOverrideFork0Config;
 use crate::hardforks::ConduitOpHardforks;
 use alloy_evm::Database;
 use alloy_primitives::U256;
+use revm::DatabaseCommit;
 use revm::bytecode::Bytecode;
 use revm::primitives::HashMap;
 use revm::state::EvmStorageSlot;
-use revm::DatabaseCommit;
 
 /// Applies state updates configured for [`StateOverrideFork0`] at the transition block.
 ///
@@ -73,7 +73,7 @@ mod tests {
     use super::*;
     use crate::hardforks::ConduitOpHardfork;
     use alloy_genesis::GenesisAccount;
-    use alloy_primitives::{Address, Bytes, B256};
+    use alloy_primitives::{Address, B256, Bytes};
     use reth_chainspec::{EthereumHardfork, EthereumHardforks, ForkCondition};
     use reth_optimism_forks::{OpHardfork, OpHardforks};
     use revm::database::InMemoryDB;
@@ -173,7 +173,9 @@ mod tests {
 
     #[test]
     fn injects_bytecode_at_transition_block() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -188,7 +190,9 @@ mod tests {
 
     #[test]
     fn sets_storage_at_transition_block() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
         let config = storage_config();
         let mut db = InMemoryDB::default();
 
@@ -203,7 +207,9 @@ mod tests {
 
     #[test]
     fn applies_bytecode_and_storage_together() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
         let config = mixed_config();
         let mut db = InMemoryDB::default();
 
@@ -220,7 +226,9 @@ mod tests {
 
     #[test]
     fn applies_multiple_updates() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
         let config = multi_config();
         let mut db = InMemoryDB::default();
 
@@ -242,7 +250,9 @@ mod tests {
 
     #[test]
     fn no_op_before_activation() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -254,7 +264,9 @@ mod tests {
 
     #[test]
     fn no_op_after_transition() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -266,7 +278,9 @@ mod tests {
 
     #[test]
     fn preserves_existing_balance_and_nonce() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -298,6 +312,9 @@ mod tests {
         ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
-        assert!(info.is_none(), "should not apply when fork is not configured");
+        assert!(
+            info.is_none(),
+            "should not apply when fork is not configured"
+        );
     }
 }
