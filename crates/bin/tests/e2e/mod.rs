@@ -111,14 +111,12 @@ pub fn build_genesis_with_override(
         }
     });
 
-    if let Some(alloc) = extra_alloc {
-        if let serde_json::Value::Object(map) = alloc {
-            let alloc_obj = genesis["alloc"]
-                .as_object_mut()
-                .expect("alloc should be object");
-            for (k, v) in map {
-                alloc_obj.insert(k, v);
-            }
+    if let Some(serde_json::Value::Object(map)) = extra_alloc {
+        let alloc_obj = genesis["alloc"]
+            .as_object_mut()
+            .expect("alloc should be object");
+        for (k, v) in map {
+            alloc_obj.insert(k, v);
         }
     }
 

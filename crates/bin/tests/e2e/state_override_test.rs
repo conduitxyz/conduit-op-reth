@@ -84,7 +84,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&STORAGE_ADDRESS)?;
     assert!(code.is_none(), "should have no code before activation");
-    let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT.into())?;
+    let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?;
     assert_eq!(value, None, "storage should be empty before activation");
 
     // Block at t=4: fork activates.
@@ -92,7 +92,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&STORAGE_ADDRESS)?;
     assert!(code.is_some(), "should have code at activation");
-    let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT.into())?;
+    let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?;
     assert_eq!(
         value,
         Some(U256::from(0xff)),
@@ -102,7 +102,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     // Block at t=6: post-activation, storage persists.
     ctx.advance_block().await?;
     let state = ctx.inner.provider.latest()?;
-    let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT.into())?;
+    let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?;
     assert_eq!(
         value,
         Some(U256::from(0xff)),
@@ -245,13 +245,13 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
         Bytes::from_static(TARGET_BYTECODE),
         "code should be overwritten by fork override"
     );
-    let val1 = state.storage(contract_addr, STORAGE_SLOT.into())?;
+    let val1 = state.storage(contract_addr, STORAGE_SLOT)?;
     assert_eq!(
         val1,
         Some(U256::from(0xff)),
         "slot 1 should be set by override"
     );
-    let val2 = state.storage(contract_addr, STORAGE_SLOT_2.into())?;
+    let val2 = state.storage(contract_addr, STORAGE_SLOT_2)?;
     assert_eq!(
         val2,
         Some(U256::from(0x42)),
@@ -265,9 +265,9 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
         .account_code(&contract_addr)?
         .expect("code should persist after activation");
     assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
-    let val1 = state.storage(contract_addr, STORAGE_SLOT.into())?;
+    let val1 = state.storage(contract_addr, STORAGE_SLOT)?;
     assert_eq!(val1, Some(U256::from(0xff)), "slot 1 should persist");
-    let val2 = state.storage(contract_addr, STORAGE_SLOT_2.into())?;
+    let val2 = state.storage(contract_addr, STORAGE_SLOT_2)?;
     assert_eq!(val2, Some(U256::from(0x42)), "slot 2 should persist");
 
     Ok(())
@@ -410,7 +410,7 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
         "addr_b: no code before fork"
     );
     assert_eq!(
-        state.storage(addr_b, STORAGE_SLOT.into())?,
+        state.storage(addr_b, STORAGE_SLOT)?,
         None,
         "addr_b: no storage before fork"
     );
@@ -436,7 +436,7 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
         Bytes::from_static(&[0xfe, 0xfe]),
         "addr_b: bytecode should match"
     );
-    let val = state.storage(addr_b, STORAGE_SLOT.into())?;
+    let val = state.storage(addr_b, STORAGE_SLOT)?;
     assert_eq!(
         val,
         Some(U256::from(0xff)),
@@ -456,7 +456,7 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
         .account_code(&addr_b)?
         .expect("addr_b: code should persist");
     assert_eq!(code_b.original_bytes(), Bytes::from_static(&[0xfe, 0xfe]));
-    let val = state.storage(addr_b, STORAGE_SLOT.into())?;
+    let val = state.storage(addr_b, STORAGE_SLOT)?;
     assert_eq!(
         val,
         Some(U256::from(0xff)),
