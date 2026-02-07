@@ -8,6 +8,7 @@ use reth_storage_api::{AccountReader, StateProvider};
 
 #[tokio::test]
 async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
     let genesis_json = build_genesis_with_override(
         FORK_ACTIVATION_TIMESTAMP,
         serde_json::json!({
@@ -55,6 +56,7 @@ async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()
 
 #[tokio::test]
 async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
     let genesis_json = build_genesis_with_override(
         FORK_ACTIVATION_TIMESTAMP,
         serde_json::json!({
@@ -101,6 +103,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
 
 #[tokio::test]
 async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
     let genesis_json = build_genesis_with_override(
         FORK_ACTIVATION_TIMESTAMP,
         serde_json::json!({

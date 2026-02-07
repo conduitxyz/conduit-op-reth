@@ -1,4 +1,4 @@
-use alloy_primitives::{address, b256, Address, Bytes, B256};
+use alloy_primitives::{address, b256, Address, Bytes, B256, B64};
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_optimism_node::OpPayloadBuilderAttributes;
@@ -65,8 +65,8 @@ pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
         transactions: vec![WithEncoded::new(l1_info_raw, l1_info_tx)],
         no_tx_pool: false,
         gas_limit: Some(30_000_000),
-        eip_1559_params: None,
-        min_base_fee: None,
+        eip_1559_params: Some(B64::ZERO),
+        min_base_fee: Some(0),
     }
 }
 

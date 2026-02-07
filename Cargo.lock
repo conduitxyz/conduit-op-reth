@@ -2058,6 +2058,7 @@ dependencies = [
  "reth-provider",
  "reth-storage-api",
  "reth-tasks",
+ "reth-tracing",
  "serde_json",
  "tokio",
  "tracing",
@@ -8869,6 +8870,7 @@ source = "git+https://github.com/paradigmxyz/reth?tag=v1.10.2#8e3b5e6a99439561b7
 dependencies = [
  "clap",
  "eyre",
+ "reth-tracing-otlp",
  "rolling-file",
  "tracing",
  "tracing-appender",
