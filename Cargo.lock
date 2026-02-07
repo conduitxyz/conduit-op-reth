@@ -2034,10 +2034,14 @@ dependencies = [
 name = "conduit-op-reth"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-eips",
  "alloy-genesis",
+ "alloy-network",
  "alloy-primitives",
  "alloy-rpc-types-engine",
+ "alloy-rpc-types-eth",
+ "alloy-signer-local",
  "clap",
  "conduit-op-reth-node",
  "eyre",
