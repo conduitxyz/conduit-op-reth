@@ -15,8 +15,7 @@ use revm::DatabaseCommit;
 
 /// Applies state updates configured for [`StateOverrideFork0`] at the transition block.
 ///
-/// Each update entry uses [`GenesisAccount`](alloy_genesis::GenesisAccount) from alloy-genesis,
-/// and can optionally set `code` (bytecode) and/or `storage` slots on a target address.
+/// Each update entry can set `code` (bytecode) and/or `storage` slots on a target address.
 /// Existing account balance and nonce are preserved.
 ///
 /// Uses the OP Stack 2-second block time heuristic (matching Canyon's `ensure_create2_deployer`)
@@ -71,8 +70,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chainspec::StateOverrideAccount;
     use crate::hardforks::ConduitOpHardfork;
-    use alloy_genesis::GenesisAccount;
     use alloy_primitives::{Address, Bytes, B256};
     use reth_chainspec::{EthereumHardfork, EthereumHardforks, ForkCondition};
     use reth_optimism_forks::{OpHardfork, OpHardforks};
@@ -112,9 +111,9 @@ mod tests {
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x42),
-            GenesisAccount {
+            StateOverrideAccount {
                 code: Some(Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52])),
-                ..Default::default()
+                storage: None,
             },
         );
         StateOverrideFork0Config { updates }
@@ -127,9 +126,9 @@ mod tests {
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x99),
-            GenesisAccount {
+            StateOverrideAccount {
+                code: None,
                 storage: Some(storage),
-                ..Default::default()
             },
         );
         StateOverrideFork0Config { updates }
@@ -141,10 +140,9 @@ mod tests {
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x42),
-            GenesisAccount {
+            StateOverrideAccount {
                 code: Some(Bytes::from_static(&[0x60, 0x80])),
                 storage: Some(storage),
-                ..Default::default()
             },
         );
         StateOverrideFork0Config { updates }
@@ -154,18 +152,18 @@ mod tests {
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x42),
-            GenesisAccount {
+            StateOverrideAccount {
                 code: Some(Bytes::from_static(&[0x60, 0x80])),
-                ..Default::default()
+                storage: None,
             },
         );
         let mut storage = BTreeMap::new();
         storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xff));
         updates.insert(
             Address::with_last_byte(0x99),
-            GenesisAccount {
+            StateOverrideAccount {
+                code: None,
                 storage: Some(storage),
-                ..Default::default()
             },
         );
         StateOverrideFork0Config { updates }
