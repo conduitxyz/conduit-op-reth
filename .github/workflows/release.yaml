@@ -50,14 +50,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute tags
+        id: tags
+        run: |
+          TAGS="${{ env.IMAGE }}:${{ env.VERSION }}"
+          if [[ "${{ env.VERSION }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            TAGS="${TAGS},${{ env.IMAGE }}:latest"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ env.VERSION }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -108,4 +115,9 @@ jobs:
           ENDBODY
           )
 
-          echo "$body" | gh release create --draft -t "conduit-op-reth ${{ env.VERSION }}" -F "-" "${{ env.VERSION }}"
+          prerelease_flag=""
+          if [[ ! "${{ env.VERSION }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            prerelease_flag="--prerelease"
+          fi
+
+          echo "$body" | gh release create --draft $prerelease_flag -t "conduit-op-reth ${{ env.VERSION }}" -F "-" "${{ env.VERSION }}"
