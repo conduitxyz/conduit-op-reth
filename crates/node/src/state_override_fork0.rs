@@ -28,20 +28,40 @@ use revm::state::EvmStorageSlot;
 pub(crate) fn ensure_state_override_fork0<DB>(
     chain_spec: &impl ConduitOpHardforks,
     timestamp: u64,
+    parent_timestamp: u64,
     config: &StateOverrideFork0Config,
     db: &mut DB,
 ) -> Result<(), DB::Error>
 where
     DB: Database + DatabaseCommit,
 {
-    // If the fork is active at the current timestamp but was not active at the previous block
-    // timestamp (heuristically, OP Stack block time is 2s), then we are at the transition block.
-    // TODO(rezmah): review whether 2s heuristic is appropriate for all target chains
-    if !chain_spec.is_state_override_fork0_active_at_timestamp(timestamp)
-        || chain_spec.is_state_override_fork0_active_at_timestamp(timestamp.saturating_sub(2))
-    {
+    let active_now = chain_spec.is_state_override_fork0_active_at_timestamp(timestamp);
+    let active_prev =
+        chain_spec.is_state_override_fork0_active_at_timestamp(parent_timestamp);
+
+    tracing::info!(
+        target: "conduit_op::state_override",
+        timestamp,
+        parent_timestamp,
+        active_now,
+        active_prev,
+        num_updates = config.updates.len(),
+        "ensure_state_override_fork0 called"
+    );
+
+    // Apply overrides on the transition block: fork is active now but was not active
+    // at the parent block's timestamp.
+    if !active_now || active_prev {
         return Ok(());
     }
+
+    tracing::info!(
+        target: "conduit_op::state_override",
+        timestamp,
+        parent_timestamp,
+        num_updates = config.updates.len(),
+        "APPLYING state overrides at transition block"
+    );
 
     for (&address, account) in &config.updates {
         let mut acc_info = db.basic(address)?.unwrap_or_default();
@@ -160,7 +180,7 @@ mod tests {
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(&spec, 1000, 998, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x42);
         let info = db.basic_ref(addr).unwrap().expect("account should exist");
@@ -177,7 +197,7 @@ mod tests {
         let config = mixed_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(&spec, 1000, 998, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x42);
         let info = db.basic_ref(addr).unwrap().expect("account should exist");
@@ -196,7 +216,7 @@ mod tests {
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 998, &config, &mut db).unwrap();
+        ensure_state_override_fork0(&spec, 998, 996, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply before fork activates");
@@ -210,7 +230,8 @@ mod tests {
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1002, &config, &mut db).unwrap();
+        // parent_timestamp=1000 is already past fork_time=1000, so both are active → no-op.
+        ensure_state_override_fork0(&spec, 1002, 1000, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply after transition block");
@@ -233,7 +254,7 @@ mod tests {
             },
         );
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(&spec, 1000, 998, &config, &mut db).unwrap();
 
         let info = db
             .basic_ref(Address::with_last_byte(0x42))
@@ -261,7 +282,7 @@ mod tests {
             .with_bundle_update()
             .build();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(&spec, 1000, 998, &config, &mut db).unwrap();
 
         db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
 
@@ -280,7 +301,7 @@ mod tests {
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(&spec, 1000, 998, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(
