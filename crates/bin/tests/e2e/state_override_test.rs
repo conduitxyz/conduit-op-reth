@@ -61,6 +61,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
         FORK_ACTIVATION_TIMESTAMP,
         serde_json::json!({
             "0x4200000000000000000000000000000000000099": {
+                "code": "0x6080604052",
                 "storage": {
                     "0x0000000000000000000000000000000000000000000000000000000000000001":
                         "0x00000000000000000000000000000000000000000000000000000000000000ff"
@@ -75,12 +76,16 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     // Block at t=2: fork not yet active.
     ctx.advance_block().await?;
     let state = ctx.inner.provider.latest()?;
+    let code = state.account_code(&STORAGE_ADDRESS)?;
+    assert!(code.is_none(), "should have no code before activation");
     let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT.into())?;
     assert_eq!(value, None, "storage should be empty before activation");
 
     // Block at t=4: fork activates.
     ctx.advance_block().await?;
     let state = ctx.inner.provider.latest()?;
+    let code = state.account_code(&STORAGE_ADDRESS)?;
+    assert!(code.is_some(), "should have code at activation");
     let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT.into())?;
     assert_eq!(
         value,
