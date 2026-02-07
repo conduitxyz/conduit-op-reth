@@ -52,17 +52,15 @@ jobs:
       - name: Compute tags
         id: tags
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           SHA: ${{ github.sha }}
         run: |
           SHORT_SHA="${SHA:0:7}"
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            TAGS="${{ env.IMAGE }}:pr-${PR_NUMBER}"
-          else
-            TAGS="${{ env.IMAGE }}:latest,${{ env.IMAGE }}:${SHORT_SHA}"
+          TAGS="${{ env.IMAGE }}:${SHORT_SHA}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${{ env.IMAGE }}:latest"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -75,16 +73,8 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Verify Docker image runs
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            TAG="pr-${PR_NUMBER}"
-          else
-            TAG="latest"
-          fi
-          IMAGE="${{ env.IMAGE }}:${TAG}"
+          IMAGE="${{ env.IMAGE }}:${{ steps.tags.outputs.short_sha }}"
           echo "Pulling and testing image: $IMAGE"
           docker pull "$IMAGE"
           docker run --rm "$IMAGE" --version
