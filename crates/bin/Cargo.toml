@@ -21,3 +21,23 @@ reth-cli-util.workspace = true
 
 clap.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+conduit-op-reth-node.workspace = true
+reth-cli.workspace = true
+reth-e2e-test-utils.workspace = true
+reth-node-api.workspace = true
+reth-node-builder = { workspace = true, features = ["test-utils"] }
+reth-node-core.workspace = true
+reth-payload-primitives.workspace = true
+reth-payload-builder.workspace = true
+reth-tasks.workspace = true
+reth-optimism-node = { workspace = true, features = ["test-utils"] }
+reth-provider.workspace = true
+reth-storage-api.workspace = true
+alloy-primitives.workspace = true
+alloy-genesis.workspace = true
+alloy-rpc-types-engine.workspace = true
+serde_json.workspace = true
+eyre.workspace = true
+tokio.workspace = true
