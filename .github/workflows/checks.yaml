@@ -41,43 +41,56 @@ jobs:
             didn't match the configured pattern. Please ensure that the subject
             doesn't start with an uppercase character.
 
-  lint_and_test:
-    name: Lint and test
-    runs-on: ubuntu-latest-16core
-
+  fmt:
+    name: Check formatting
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout sources
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup rust toolchain
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Run rustfmt
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy lint
+    runs-on: ubuntu-latest-16core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: "rustfmt,clippy"
+          components: clippy
 
-      - name: Run Swatinem/rust-cache@v2
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-
-      - name: Run sccache-action
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Set sccache env vars
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
-          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libtss2-dev
 
-      - name: Build
-        run: cargo build --workspace
-
-      - name: Lint
+      - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Format check
-        run: cargo fmt --all -- --check
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest-16core
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Test
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libtss2-dev
+
+      - name: Run tests
         run: cargo test --workspace

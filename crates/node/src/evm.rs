@@ -7,21 +7,25 @@ use crate::chainspec::ConduitOpChainSpec;
 use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks};
 use crate::state_override_fork0::ensure_state_override_fork0;
 use alloy_consensus::Header;
-use alloy_evm::block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFor, ExecutableTx, OnStateHook, StateDB};
-use alloy_evm::{Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded};
 use alloy_eips::Decodable2718;
-use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
+use alloy_evm::block::{
+    BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFor, ExecutableTx,
+    OnStateHook, StateDB,
+};
+use alloy_evm::{Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded};
 use alloy_op_evm::block::OpTxEnv;
+use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
 use alloy_op_evm::{OpBlockExecutionCtx, OpBlockExecutor, OpEvmFactory};
 use alloy_primitives::Bytes;
-use op_alloy_rpc_types_engine::OpExecutionData;
 use op_alloy_consensus::EIP1559ParamError;
+use op_alloy_rpc_types_engine::OpExecutionData;
 use op_revm::OpSpecId;
-use reth_evm::{ConfigureEvm, ConfigureEngineEvm, EvmEnv, EvmEnvFor, ExecutionCtxFor, ExecutableTxIterator, InspectorFor};
+use reth_evm::{
+    ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+    InspectorFor,
+};
 use reth_node_builder::components::ExecutorBuilder;
 use reth_node_builder::{BuilderContext, NodeTypes};
-use reth_primitives_traits::{SignedTransaction, TxTy, WithEncoded};
-use reth_storage_errors::any::AnyError;
 use reth_optimism_evm::{
     OpBlockAssembler, OpBlockExecutorFactory, OpEvmConfig, OpNextBlockEnvAttributes,
     OpRethReceiptBuilder,
@@ -29,6 +33,8 @@ use reth_optimism_evm::{
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_primitives::OpPrimitives;
 use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader};
+use reth_primitives_traits::{SignedTransaction, TxTy, WithEncoded};
+use reth_storage_errors::any::AnyError;
 use revm::context::Block;
 use revm::context::result::ResultAndState;
 use revm::database::{DatabaseCommit, State};
@@ -44,17 +50,16 @@ pub struct ConduitOpBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     chain_spec: Arc<ConduitOpChainSpec>,
 }
 
-
-
 impl<E, R, Spec> BlockExecutor for ConduitOpBlockExecutor<E, R, Spec>
 where
     E: Evm<
-        DB: Database + DatabaseCommit + StateDB,
-        Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction> + OpTxEnv,
-    >,    R: OpReceiptBuilder<
-        Transaction: alloy_consensus::Transaction + alloy_eips::Encodable2718,
-        Receipt: alloy_consensus::TxReceipt,
-    >,
+            DB: Database + DatabaseCommit + StateDB,
+            Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction> + OpTxEnv,
+        >,
+    R: OpReceiptBuilder<
+            Transaction: alloy_consensus::Transaction + alloy_eips::Encodable2718,
+            Receipt: alloy_consensus::TxReceipt,
+        >,
     Spec: OpHardforks + Clone,
 {
     type Transaction = R::Transaction;
@@ -115,7 +120,6 @@ where
         self.inner.receipts()
     }
 }
-
 
 /// Custom EVM configuration wrapping [`OpEvmConfig`].
 ///
@@ -222,8 +226,8 @@ impl ConfigureEngineEvm<OpExecutionData> for ConduitOpEvmConfig {
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         let transactions = payload.payload.transactions().clone();
         let convert = |encoded: Bytes| {
-            let tx = TxTy::<OpPrimitives>::decode_2718_exact(encoded.as_ref())
-                .map_err(AnyError::new)?;
+            let tx =
+                TxTy::<OpPrimitives>::decode_2718_exact(encoded.as_ref()).map_err(AnyError::new)?;
             let signer = tx.try_recover().map_err(AnyError::new)?;
             Ok::<_, AnyError>(WithEncoded::new(encoded, tx.with_signer(signer)))
         };
@@ -231,7 +235,6 @@ impl ConfigureEngineEvm<OpExecutionData> for ConduitOpEvmConfig {
         Ok((transactions, convert))
     }
 }
-
 
 /// Executor builder that produces [`ConduitOpEvmConfig`].
 ///
@@ -244,8 +247,8 @@ pub struct ConduitOpExecutorBuilder;
 impl<Node> ExecutorBuilder<Node> for ConduitOpExecutorBuilder
 where
     Node: reth_node_builder::node::FullNodeTypes<
-        Types: NodeTypes<ChainSpec = ConduitOpChainSpec, Primitives = OpPrimitives>,
-    >,
+            Types: NodeTypes<ChainSpec = ConduitOpChainSpec, Primitives = OpPrimitives>,
+        >,
 {
     type EVM = ConduitOpEvmConfig;
 
@@ -253,9 +256,8 @@ where
         let chain_spec = ctx.chain_spec();
 
         if let Some(ref config) = chain_spec.state_override_fork0 {
-            let activation = chain_spec.conduit_op_fork_activation(
-                ConduitOpHardfork::StateOverrideFork0,
-            );
+            let activation =
+                chain_spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0);
             info!(
                 target: "conduit_op::executor",
                 ?activation,
@@ -267,4 +269,3 @@ where
         Ok(ConduitOpEvmConfig::new(chain_spec))
     }
 }
-

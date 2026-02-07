@@ -1,21 +1,20 @@
+use crate::chainspec::ConduitOpChainSpec;
+use crate::evm::ConduitOpExecutorBuilder;
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_node_api::{FullNodeComponents, PayloadAttributesBuilder, PayloadTypes};
 use reth_node_builder::{
+    DebugNode, Node, NodeAdapter, NodeComponentsBuilder, NodeTypes,
     components::{BasicPayloadServiceBuilder, ComponentsBuilder},
     node::FullNodeTypes,
     rpc::BasicEngineValidatorBuilder,
-    DebugNode, Node, NodeAdapter, NodeComponentsBuilder, NodeTypes,
 };
-use crate::chainspec::ConduitOpChainSpec;
-use crate::evm::ConduitOpExecutorBuilder;
 use reth_optimism_node::{
-    node::{
-        OpAddOns, OpAddOnsBuilder, OpConsensusBuilder, OpEngineValidatorBuilder,
-        OpFullNodeTypes, OpNetworkBuilder, OpNodeTypes, OpPayloadBuilder,
-        OpPoolBuilder,
-    },
-    args::RollupArgs,
     OpDAConfig, OpEngineApiBuilder, OpEngineTypes, OpStorage,
+    args::RollupArgs,
+    node::{
+        OpAddOns, OpAddOnsBuilder, OpConsensusBuilder, OpEngineValidatorBuilder, OpFullNodeTypes,
+        OpNetworkBuilder, OpNodeTypes, OpPayloadBuilder, OpPoolBuilder,
+    },
 };
 use reth_optimism_payload_builder::config::OpGasLimitConfig;
 use reth_optimism_primitives::OpPrimitives;
@@ -44,7 +43,11 @@ pub struct ConduitOpNode {
 impl ConduitOpNode {
     /// Creates a new instance of the ConduitOp node type.
     pub fn new(args: RollupArgs) -> Self {
-        Self { args, da_config: OpDAConfig::default(), gas_limit_config: OpGasLimitConfig::default() }
+        Self {
+            args,
+            da_config: OpDAConfig::default(),
+            gas_limit_config: OpGasLimitConfig::default(),
+        }
     }
 
     /// Configure the data availability configuration for the OP builder.
@@ -91,8 +94,12 @@ where
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        let RollupArgs { disable_txpool_gossip, compute_pending_block, discovery_v4, .. } =
-            self.args;
+        let RollupArgs {
+            disable_txpool_gossip,
+            compute_pending_block,
+            discovery_v4,
+            ..
+        } = self.args;
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(

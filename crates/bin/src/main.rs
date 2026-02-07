@@ -27,9 +27,13 @@ fn main() {
     if let Err(err) = Cli::<ConduitOpChainSpecParser, RollupArgs>::parse()
         .run_with_components::<ConduitOpNode>(
             |spec: Arc<ConduitOpChainSpec>| {
-                (ConduitOpEvmConfig::new(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
+                (
+                    ConduitOpEvmConfig::new(spec.clone()),
+                    Arc::new(OpBeaconConsensus::new(spec)),
+                )
             },
-            |builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ConduitOpChainSpec>>, rollup_args| async move {
+            |builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ConduitOpChainSpec>>,
+             rollup_args| async move {
                 info!(target: "reth::cli", "Launching conduit-op-reth node");
                 let handle = builder
                     .node(ConduitOpNode::new(rollup_args))
