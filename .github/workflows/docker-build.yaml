@@ -57,7 +57,7 @@ jobs:
           SHORT_SHA="${SHA:0:7}"
           TAGS="${{ env.IMAGE }}:${SHORT_SHA}"
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            TAGS="${TAGS},${{ env.IMAGE }}:latest"
+            TAGS="${TAGS},${{ env.IMAGE }}:main"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
