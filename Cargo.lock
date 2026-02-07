@@ -2034,6 +2034,7 @@ dependencies = [
 name = "conduit-op-reth"
 version = "0.1.0"
 dependencies = [
+ "alloy-eips",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
@@ -2048,10 +2049,12 @@ dependencies = [
  "reth-node-api",
  "reth-node-builder",
  "reth-node-core",
+ "reth-optimism-chainspec",
  "reth-optimism-consensus",
  "reth-optimism-node",
  "reth-payload-builder",
  "reth-payload-primitives",
+ "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
  "reth-tasks",

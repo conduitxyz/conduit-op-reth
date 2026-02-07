@@ -1,8 +1,9 @@
-use alloy_primitives::{address, b256, Address, B256};
+use alloy_primitives::{address, b256, Address, Bytes, B256};
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_payload_builder::EthPayloadBuilderAttributes;
+use reth_primitives_traits::WithEncoded;
 use std::sync::Arc;
 
 pub mod state_override_test;
@@ -38,7 +39,13 @@ pub const PREFUND_BALANCE: &str = "0xde0b6b3a7640000"; // 1 ETH
 const BASE_GENESIS: &str = include_str!("../../../../tests/fixtures/saigon-genesis.json");
 
 /// Create OP payload attributes for the test node.
-pub fn op_payload_attributes<T>(timestamp: u64) -> OpPayloadBuilderAttributes<T> {
+///
+/// Includes the L1 block info deposit transaction required by every OP Stack block.
+/// Uses the same hardcoded deposit tx from OP mainnet block 124665056 that reth's
+/// `LocalPayloadAttributesBuilder` uses.
+pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
+    timestamp: u64,
+) -> OpPayloadBuilderAttributes<T> {
     let attributes = alloy_rpc_types_engine::PayloadAttributes {
         timestamp,
         prev_randao: B256::ZERO,
@@ -47,9 +54,15 @@ pub fn op_payload_attributes<T>(timestamp: u64) -> OpPayloadBuilderAttributes<T>
         parent_beacon_block_root: Some(B256::ZERO),
     };
 
+    // Decode the L1 block info deposit tx from the raw constant.
+    let l1_info_raw =
+        Bytes::from_static(&reth_optimism_chainspec::constants::TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056);
+    let l1_info_tx = T::decode_2718(&mut l1_info_raw.as_ref())
+        .expect("failed to decode L1 block info deposit tx");
+
     OpPayloadBuilderAttributes {
         payload_attributes: EthPayloadBuilderAttributes::new(B256::ZERO, attributes),
-        transactions: vec![],
+        transactions: vec![WithEncoded::new(l1_info_raw, l1_info_tx)],
         no_tx_pool: false,
         gas_limit: Some(30_000_000),
         eip_1559_params: None,
