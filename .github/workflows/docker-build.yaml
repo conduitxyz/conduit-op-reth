@@ -1,52 +1,30 @@
 name: Docker Build
 
 permissions:
-  contents: write
-  id-token: write
-  issues: write
-  pull-requests: write
+  contents: read
+  packages: write
 
 on:
   workflow_call:
     inputs:
-      STAGE_REGISTRY:
-        required: false
-        type: string
-        default: us-docker.pkg.dev/exfac-staging/conduit
-      PROD_REGISTRY:
-        required: false
-        type: string
-        default: us-docker.pkg.dev/optimum-sound-359720/conduit
       IMAGE_NAME:
         required: true
         type: string
       target:
         required: false
         type: string
-      workdir:
-        required: false
-        type: string
-        default: ./
   workflow_dispatch:
     inputs:
-      STAGE_REGISTRY:
-        required: false
-        type: string
-        default: us-docker.pkg.dev/exfac-staging/conduit
-      PROD_REGISTRY:
-        required: false
-        type: string
-        default: us-docker.pkg.dev/optimum-sound-359720/conduit
       IMAGE_NAME:
         required: true
         type: string
       target:
         required: false
         type: string
-      workdir:
-        required: false
-        type: string
-        default: ./
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository_owner }}/${{ inputs.IMAGE_NAME }}
 
 jobs:
   docker-build:
@@ -57,28 +35,46 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - uses: conduitxyz/docker-builds-action@v3
-        id: docker-build
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
         with:
-          STAGE_REGISTRY: ${{ inputs.STAGE_REGISTRY }}
-          PROD_REGISTRY: ${{ inputs.PROD_REGISTRY }}
-          IMAGE_NAME: ${{ inputs.IMAGE_NAME }}
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          SHORT_SHA="${SHA:0:7}"
+          TAGS="${{ env.IMAGE }}:${SHORT_SHA}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${{ env.IMAGE }}:main"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
           target: ${{ inputs.target }}
-          workdir: ${{ inputs.workdir }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Verify Docker image runs
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          STAGE_REGISTRY: ${{ inputs.STAGE_REGISTRY }}
-          IMAGE_NAME: ${{ inputs.IMAGE_NAME }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            TAG="pr-${PR_NUMBER}-latest"
-          else
-            TAG="latest"
-          fi
-          IMAGE="${STAGE_REGISTRY}/${IMAGE_NAME}:${TAG}"
+          IMAGE="${{ env.IMAGE }}:${{ steps.tags.outputs.short_sha }}"
           echo "Pulling and testing image: $IMAGE"
           docker pull "$IMAGE"
           docker run --rm "$IMAGE" --version

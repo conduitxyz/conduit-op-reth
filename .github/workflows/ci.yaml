@@ -15,4 +15,3 @@ jobs:
     uses: ./.github/workflows/docker-build.yaml
     with:
       IMAGE_NAME: conduit-op-reth
-    secrets: inherit
