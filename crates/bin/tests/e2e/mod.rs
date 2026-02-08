@@ -9,7 +9,6 @@ use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::WithEncoded;
-use reth_tasks::TaskManager;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,45 +30,28 @@ alloy_sol_macro::sol! {
     }
 }
 
-/// Address to receive bytecode override.
 pub const TARGET_ADDRESS: Address = address!("4200000000000000000000000000000000000042");
-
-/// Bytecode to inject at TARGET_ADDRESS (minimal PUSH1 0x80 PUSH1 0x40 MSTORE).
 pub const TARGET_BYTECODE: &[u8] = &[0x60, 0x80, 0x60, 0x40, 0x52];
-
-/// Address to receive storage overrides.
 pub const STORAGE_ADDRESS: Address = address!("4200000000000000000000000000000000000099");
-
-/// Storage slot key.
 pub const STORAGE_SLOT: B256 =
     b256!("0000000000000000000000000000000000000000000000000000000000000001");
-
-/// Second storage slot key.
 pub const STORAGE_SLOT_2: B256 =
     b256!("0000000000000000000000000000000000000000000000000000000000000002");
-
-/// Initial timestamp used by the PayloadTestContext (hardcoded in reth-e2e-test-utils).
-/// Each advance_block() increments by 1.
-const INITIAL_PAYLOAD_TIMESTAMP: u64 = 1710338135;
-
-/// Fork activation timestamp. PayloadTestContext starts at INITIAL_PAYLOAD_TIMESTAMP and
-/// increments by 1, so:
-/// - Block 1: t=INITIAL+1 → fork not active
-/// - Block 2: t=INITIAL+2 → fork active now, NOT active at t-2=INITIAL → applies override
-/// - Block 3: t=INITIAL+3 → fork active now AND at t-2=INITIAL+1 → no-op
-pub const FORK_ACTIVATION_TIMESTAMP: u64 = INITIAL_PAYLOAD_TIMESTAMP + 2;
-
-/// Balance to pre-fund TARGET_ADDRESS with in the balance-preservation test.
 pub const PREFUND_BALANCE: &str = "0xde0b6b3a7640000"; // 1 ETH
 
-/// Base genesis JSON with all OP hardforks at genesis.
+/// Initial timestamp used by reth's `PayloadTestContext` (hardcoded).
+/// Each `advance_block()` increments by 1.
+const INITIAL_PAYLOAD_TIMESTAMP: u64 = 1710338135;
+
+/// Fork activation timestamp.
+/// - Block 1: t=INITIAL+1 -> fork not active
+/// - Block 2: t=INITIAL+2 -> fork active, NOT active at t-2 -> applies override
+/// - Block 3: t=INITIAL+3 -> fork active AND active at t-2 -> no-op
+pub const FORK_ACTIVATION_TIMESTAMP: u64 = INITIAL_PAYLOAD_TIMESTAMP + 2;
+
 const BASE_GENESIS: &str = include_str!("../../../../tests/fixtures/saigon-genesis.json");
 
-/// Create OP payload attributes for the test node.
-///
-/// Includes the L1 block info deposit transaction required by every OP Stack block.
-/// Uses the same hardcoded deposit tx from OP mainnet block 124665056 that reth's
-/// `LocalPayloadAttributesBuilder` uses.
+/// Create OP payload attributes including the required L1 block info deposit tx.
 pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
     timestamp: u64,
 ) -> OpPayloadBuilderAttributes<T> {
@@ -81,7 +63,6 @@ pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
         parent_beacon_block_root: Some(B256::ZERO),
     };
 
-    // Decode the L1 block info deposit tx from the raw constant.
     let l1_info_raw = Bytes::from_static(
         &reth_optimism_chainspec::constants::TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056,
     );
@@ -98,7 +79,7 @@ pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
     }
 }
 
-/// Build a genesis JSON with the conduit stateOverrideFork0 section injected.
+/// Build genesis JSON with a `conduit.stateOverrideFork0` section injected.
 pub fn build_genesis_with_override(
     fork_time: u64,
     updates: serde_json::Value,
@@ -107,11 +88,8 @@ pub fn build_genesis_with_override(
     let mut genesis: serde_json::Value =
         serde_json::from_str(BASE_GENESIS).expect("failed to parse base genesis");
 
-    // Ensure genesis extra data is valid for Jovian (active at time=0 in saigon genesis).
-    // Jovian extra data is 17 bytes: version=1, eip1559 params, min_base_fee.
-    // We encode zeros for params/min base fee, which signals defaults.
+    // Jovian extra data: 17 bytes (version=1, zeros for eip1559 params/min base fee).
     if let Some(obj) = genesis.as_object_mut() {
-        // Normalize to the canonical key expected by alloy_genesis (`extraData`).
         obj.remove("extradata");
         obj.insert(
             "extraData".to_string(),
@@ -138,17 +116,17 @@ pub fn build_genesis_with_override(
     serde_json::to_string(&genesis).unwrap()
 }
 
-/// Parse a genesis JSON string into an Arc<ConduitOpChainSpec> via a temp file.
+/// Parse a genesis JSON string into an `Arc<ConduitOpChainSpec>` via a temp file.
 pub fn parse_chain_spec(genesis_json: &str) -> Arc<ConduitOpChainSpec> {
-    static GENESIS_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let unique = GENESIS_COUNTER.fetch_add(1, Ordering::Relaxed);
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
         "conduit-op-e2e-{}-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos(),
-        unique,
+        id,
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("genesis.json");
@@ -159,56 +137,67 @@ pub fn parse_chain_spec(genesis_json: &str) -> Arc<ConduitOpChainSpec> {
     spec
 }
 
-/// Setup test boilerplate - returns TaskManager and chain spec for individual test setup.
-pub async fn setup_test_boilerplate(
-    genesis_json: &str,
-) -> eyre::Result<(TaskManager, Arc<ConduitOpChainSpec>)> {
-    let tasks = TaskManager::current();
-    let chain_spec = parse_chain_spec(genesis_json);
-    Ok((tasks, chain_spec))
-}
-
-/// Build a NodeConfig with the test overrides we use for e2e stability.
-pub fn test_node_config(chain_spec: Arc<ConduitOpChainSpec>) -> NodeConfig<ConduitOpChainSpec> {
-    let mut node_config = NodeConfig::new(chain_spec)
+/// Build a `NodeConfig` tuned for deterministic e2e tests.
+fn test_node_config(chain_spec: Arc<ConduitOpChainSpec>) -> NodeConfig<ConduitOpChainSpec> {
+    let mut c = NodeConfig::new(chain_spec)
         .with_unused_ports()
         .with_disabled_discovery()
         .with_disabled_rpc_cache()
         .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
 
-    node_config.engine.persistence_threshold = 0;
-    node_config.engine.memory_block_buffer_target = 0;
-    node_config.engine.state_cache_disabled = true;
-    node_config.engine.prewarming_disabled = true;
-    node_config.engine.parallel_sparse_trie_disabled = true;
-    node_config.engine.state_root_fallback = true;
-    node_config.engine.state_root_task_compare_updates = true;
-    node_config.engine.storage_worker_count = Some(1);
-    node_config.engine.account_worker_count = Some(1);
+    c.engine.persistence_threshold = 0;
+    c.engine.memory_block_buffer_target = 0;
+    c.engine.state_cache_disabled = true;
+    c.engine.prewarming_disabled = true;
+    c.engine.parallel_sparse_trie_disabled = true;
+    c.engine.state_root_fallback = true;
+    c.engine.state_root_task_compare_updates = true;
+    c.engine.storage_worker_count = Some(1);
+    c.engine.account_worker_count = Some(1);
+    c.builder.max_payload_tasks = 1;
+    c.db.read_transaction_timeout = Some(0);
+    c.db.sync_mode = Some(reth_db::mdbx::SyncMode::SafeNoSync);
+    c.network.no_persist_peers = true;
+    c.network.disable_tx_gossip = true;
+    c.network.max_peers = Some(0);
 
-    node_config.builder.max_payload_tasks = 1;
-
-    node_config.db.read_transaction_timeout = Some(0);
-    node_config.db.sync_mode = Some(reth_db::mdbx::SyncMode::SafeNoSync);
-
-    node_config.network.no_persist_peers = true;
-    node_config.network.disable_tx_gossip = true;
-    node_config.network.max_peers = Some(0);
-
-    node_config
+    c
 }
 
-/// Build a signed CREATE transaction and return the raw RLP-encoded bytes.
+/// Launch a test node from a chain spec.
 ///
-/// Reth's `TransactionTestContext::deploy_tx()` uses `TxKind::Call` internally, so we
-/// construct the `TransactionRequest` manually with `TxKind::Create`.
+/// Must be a macro: `NodeBuilder::launch()` returns an unnameable `impl` type.
+/// The returned `TaskManager` must be held alive for the test duration.
+macro_rules! launch_test_node {
+    ($chain_spec:expr) => {{
+        use reth_e2e_test_utils::node::NodeTestContext;
+        use reth_node_builder::{NodeBuilder, NodeHandle};
+        use reth_tasks::TaskManager;
+
+        let tasks = TaskManager::current();
+        let node_config = crate::e2e::test_node_config($chain_spec);
+        let NodeHandle {
+            node,
+            node_exit_future: _,
+        } = NodeBuilder::new(node_config)
+            .testing_node(tasks.executor())
+            .node(conduit_op_reth_node::node::ConduitOpNode::default())
+            .launch()
+            .await?;
+
+        let ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
+        (tasks, ctx)
+    }};
+}
+
+pub(crate) use launch_test_node;
+
+/// Build a signed CREATE transaction (raw RLP-encoded bytes).
 pub async fn create_deploy_tx(chain_id: u64, init_code: Bytes, wallet: PrivateKeySigner) -> Bytes {
     let tx = TransactionRequest {
         nonce: Some(0),
         chain_id: Some(chain_id),
         gas: Some(100_000),
-        // Keep fees comfortably above the saigon genesis base fee (~250 gwei) so the tx is
-        // immediately includable.
         max_fee_per_gas: Some(1_000_000_000_000u128),
         max_priority_fee_per_gas: Some(1_000_000_000u128),
         to: Some(TxKind::Create),
