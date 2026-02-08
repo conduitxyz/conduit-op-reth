@@ -275,6 +275,75 @@ mod tests {
     }
 
     #[test]
+    fn storage_only_on_non_empty_account_persists() {
+        use revm::Database as _;
+        use revm::database::State;
+
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
+        let config = storage_only_config();
+        let mut inner = InMemoryDB::default();
+        inner.insert_account_info(
+            Address::with_last_byte(0x99),
+            AccountInfo {
+                balance: alloy_primitives::U256::from(1),
+                ..Default::default()
+            },
+        );
+        let mut db = State::builder()
+            .with_database(inner)
+            .with_bundle_update()
+            .build();
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+
+        db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
+
+        let addr = Address::with_last_byte(0x99);
+        let slot = db.storage(addr, U256::from(0x01)).unwrap();
+        assert_eq!(
+            slot,
+            U256::from(0xff),
+            "storage-only override should persist on non-empty account"
+        );
+    }
+
+    #[test]
+    fn does_not_reapply_after_transition() {
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
+        let config = bytecode_config();
+        let mut db = InMemoryDB::default();
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+
+        let addr = Address::with_last_byte(0x42);
+        let new_code = Bytes::from_static(&[0x01, 0x02]);
+        db.insert_account_info(
+            addr,
+            AccountInfo {
+                code_hash: alloy_primitives::keccak256(new_code.as_ref()),
+                code: Some(Bytecode::new_raw(new_code.clone())),
+                ..Default::default()
+            },
+        );
+
+        ensure_state_override_fork0(&spec, 1002, &config, &mut db).unwrap();
+
+        let info = db
+            .basic_ref(addr)
+            .unwrap()
+            .expect("account should exist");
+        assert_eq!(
+            info.code.unwrap().original_bytes(),
+            new_code,
+            "override should not be re-applied after transition"
+        );
+    }
+
+    #[test]
     fn no_op_when_fork_not_configured() {
         let spec = MockSpec { fork_time: None };
         let config = bytecode_config();
