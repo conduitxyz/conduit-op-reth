@@ -156,10 +156,13 @@ macro_rules! launch_test_node {
         use reth_tasks::TaskManager;
 
         let tasks = TaskManager::current();
-        let node_config = NodeConfig::new($chain_spec)
+        let mut node_config = NodeConfig::new($chain_spec)
             .with_unused_ports()
             .with_disabled_discovery()
             .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+
+        node_config.engine.persistence_threshold = 0;
+        node_config.engine.memory_block_buffer_target = 0;
 
         let NodeHandle {
             node,
