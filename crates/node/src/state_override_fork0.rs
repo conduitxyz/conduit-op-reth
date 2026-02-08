@@ -332,10 +332,7 @@ mod tests {
 
         ensure_state_override_fork0(&spec, 1002, &config, &mut db).unwrap();
 
-        let info = db
-            .basic_ref(addr)
-            .unwrap()
-            .expect("account should exist");
+        let info = db.basic_ref(addr).unwrap().expect("account should exist");
         assert_eq!(
             info.code.unwrap().original_bytes(),
             new_code,
