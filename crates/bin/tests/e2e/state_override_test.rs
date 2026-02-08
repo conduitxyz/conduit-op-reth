@@ -1,48 +1,18 @@
 use crate::e2e::{
     FORK_ACTIVATION_TIMESTAMP, OverrideTestV1, OverrideTestV2, PREFUND_BALANCE, STORAGE_ADDRESS,
     STORAGE_SLOT, STORAGE_SLOT_2, TARGET_ADDRESS, TARGET_BYTECODE, build_genesis_with_override,
-    create_deploy_tx, launch_test_node, parse_chain_spec,
+    create_deploy_tx, setup_test_boilerplate, test_node_config,
 };
 use alloy_primitives::{Bytes, TxKind, U256, address};
 use alloy_rpc_types_eth::{TransactionRequest, state::EvmOverrides};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
 use reth_chainspec::EthChainSpec;
+use reth_e2e_test_utils::node::NodeTestContext;
+use reth_node_builder::{NodeBuilder, NodeHandle};
 use reth_provider::StateProviderFactory;
-use reth_rpc_eth_api::helpers::EthCall;
+use reth_rpc_eth_api::{EthApiServer, helpers::EthCall};
 use reth_storage_api::{AccountReader, StateProvider};
-
-macro_rules! wait_for_code {
-    ($ctx:expr, $addr:expr, $expected:expr) => {{
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                let state = $ctx.inner.provider.latest()?;
-                if let Some(code) = state.account_code(&$addr)? {
-                    if code.original_bytes().as_ref() == $expected {
-                        return Ok::<(), eyre::Report>(());
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await??;
-    }};
-}
-
-macro_rules! wait_for_storage {
-    ($ctx:expr, $addr:expr, $slot:expr, $expected:expr) => {{
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                let state = $ctx.inner.provider.latest()?;
-                if state.storage($addr, $slot)? == Some($expected) {
-                    return Ok::<(), eyre::Report>(());
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await??;
-    }};
-}
 
 #[tokio::test]
 async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()> {
@@ -56,18 +26,32 @@ async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()
         }),
         None,
     );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec);
+    let (tasks, chain_spec) = setup_test_boilerplate(&genesis_json).await?;
+    let executor = tasks.executor();
+
+    let node_config = test_node_config(chain_spec.clone());
+    let NodeHandle {
+        node,
+        node_exit_future: _,
+    } = NodeBuilder::new(node_config)
+        .testing_node(executor.clone())
+        .node(conduit_op_reth_node::node::ConduitOpNode::default())
+        .launch()
+        .await?;
+    let mut ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
 
     // Block at t=2: fork not yet active.
-    ctx.advance_block().await?;
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&TARGET_ADDRESS)?;
     assert!(code.is_none(), "should have no code before activation");
 
     // Block at t=4: fork activates (transition block).
-    ctx.advance_block().await?;
-    wait_for_code!(ctx, TARGET_ADDRESS, TARGET_BYTECODE);
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     let code = state
         .account_code(&TARGET_ADDRESS)?
@@ -79,8 +63,9 @@ async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()
     );
 
     // Block at t=6: post-activation, bytecode persists.
-    ctx.advance_block().await?;
-    wait_for_code!(ctx, TARGET_ADDRESS, TARGET_BYTECODE);
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     let code = state
         .account_code(&TARGET_ADDRESS)?
@@ -110,11 +95,24 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
         }),
         None,
     );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec);
+    let (tasks, chain_spec) = setup_test_boilerplate(&genesis_json).await?;
+    let executor = tasks.executor();
+
+    let node_config = test_node_config(chain_spec.clone());
+    let NodeHandle {
+        node,
+        node_exit_future: _,
+    } = NodeBuilder::new(node_config)
+        .testing_node(executor.clone())
+        .node(conduit_op_reth_node::node::ConduitOpNode::default())
+        .launch()
+        .await?;
+    let mut ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
 
     // Block at t=2: fork not yet active.
-    ctx.advance_block().await?;
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&STORAGE_ADDRESS)?;
     assert!(code.is_none(), "should have no code before activation");
@@ -122,8 +120,9 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     assert_eq!(value, None, "storage should be empty before activation");
 
     // Block at t=4: fork activates.
-    ctx.advance_block().await?;
-    wait_for_storage!(ctx, STORAGE_ADDRESS, STORAGE_SLOT, U256::from(0xff));
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&STORAGE_ADDRESS)?;
     assert!(code.is_some(), "should have code at activation");
@@ -135,8 +134,9 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     );
 
     // Block at t=6: post-activation, storage persists.
-    ctx.advance_block().await?;
-    wait_for_storage!(ctx, STORAGE_ADDRESS, STORAGE_SLOT, U256::from(0xff));
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?;
     assert_eq!(
@@ -164,13 +164,26 @@ async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
             }
         })),
     );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec);
+    let (tasks, chain_spec) = setup_test_boilerplate(&genesis_json).await?;
+    let executor = tasks.executor();
+
+    let node_config = test_node_config(chain_spec.clone());
+    let NodeHandle {
+        node,
+        node_exit_future: _,
+    } = NodeBuilder::new(node_config)
+        .testing_node(executor.clone())
+        .node(conduit_op_reth_node::node::ConduitOpNode::default())
+        .launch()
+        .await?;
+    let mut ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
 
     let expected_balance = U256::from_str_radix("de0b6b3a7640000", 16).unwrap();
 
     // Pre-activation: balance should be set from genesis alloc.
-    ctx.advance_block().await?;
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     let account = state
         .basic_account(&TARGET_ADDRESS)?
@@ -181,8 +194,9 @@ async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
     );
 
     // Activation: bytecode applied, balance preserved.
-    ctx.advance_block().await?;
-    wait_for_code!(ctx, TARGET_ADDRESS, TARGET_BYTECODE);
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     let account = state
         .basic_account(&TARGET_ADDRESS)?
@@ -252,13 +266,43 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
         serde_json::Value::Object(updates),
         Some(serde_json::Value::Object(alloc)),
     );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec.clone());
+    let (tasks, chain_spec) = setup_test_boilerplate(&genesis_json).await?;
+    let executor = tasks.executor();
+
+    let node_config = test_node_config(chain_spec.clone());
+    let NodeHandle {
+        node,
+        node_exit_future: _,
+    } = NodeBuilder::new(node_config)
+        .testing_node(executor.clone())
+        .node(conduit_op_reth_node::node::ConduitOpNode::default())
+        .launch()
+        .await?;
+    let mut ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
 
     // Deploy the contract in block 1 (before fork activation).
     let raw_tx = create_deploy_tx(chain_spec.chain_id(), init_code, deployer_key).await;
     let tx_hash = ctx.rpc.inject_tx(raw_tx).await?;
+    let start = std::time::Instant::now();
+    loop {
+        if ctx
+            .rpc
+            .inner
+            .eth_api()
+            .transaction_by_hash(tx_hash)
+            .await?
+            .is_some()
+        {
+            break;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(2) {
+            eyre::bail!("tx {tx_hash} did not appear in txpool");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
 
     // Verify the deploy tx was included in the block.
     let included = payload
@@ -269,19 +313,55 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     assert!(included, "deploy tx {tx_hash} should be included in block");
 
     // Verify the contract was deployed with original code.
-    wait_for_code!(ctx, contract_addr, &[0xfe, 0xfe]);
+    let state = ctx.inner.provider.latest()?;
+    let code = state
+        .account_code(&contract_addr)?
+        .expect("contract should be deployed");
+    assert_eq!(
+        code.original_bytes(),
+        Bytes::from_static(&[0xfe, 0xfe]),
+        "should have original deployed bytecode"
+    );
 
     // Block 2: fork activates — code and storage should be overridden.
-    ctx.advance_block().await?;
-    wait_for_code!(ctx, contract_addr, TARGET_BYTECODE);
-    wait_for_storage!(ctx, contract_addr, STORAGE_SLOT, U256::from(0xff));
-    wait_for_storage!(ctx, contract_addr, STORAGE_SLOT_2, U256::from(0x42));
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
+    let state = ctx.inner.provider.latest()?;
+    let code = state
+        .account_code(&contract_addr)?
+        .expect("contract should still have code after override");
+    assert_eq!(
+        code.original_bytes(),
+        Bytes::from_static(TARGET_BYTECODE),
+        "code should be overwritten by fork override"
+    );
+    let val1 = state.storage(contract_addr, STORAGE_SLOT)?;
+    assert_eq!(
+        val1,
+        Some(U256::from(0xff)),
+        "slot 1 should be set by override"
+    );
+    let val2 = state.storage(contract_addr, STORAGE_SLOT_2)?;
+    assert_eq!(
+        val2,
+        Some(U256::from(0x42)),
+        "slot 2 should be set by override"
+    );
 
     // Block 3: post-activation, values persist.
-    ctx.advance_block().await?;
-    wait_for_code!(ctx, contract_addr, TARGET_BYTECODE);
-    wait_for_storage!(ctx, contract_addr, STORAGE_SLOT, U256::from(0xff));
-    wait_for_storage!(ctx, contract_addr, STORAGE_SLOT_2, U256::from(0x42));
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
+    let state = ctx.inner.provider.latest()?;
+    let code = state
+        .account_code(&contract_addr)?
+        .expect("code should persist after activation");
+    assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
+    let val1 = state.storage(contract_addr, STORAGE_SLOT)?;
+    assert_eq!(val1, Some(U256::from(0xff)), "slot 1 should persist");
+    let val2 = state.storage(contract_addr, STORAGE_SLOT_2)?;
+    assert_eq!(val2, Some(U256::from(0x42)), "slot 2 should persist");
 
     Ok(())
 }
@@ -316,8 +396,19 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
             }
         })),
     );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec);
+    let (tasks, chain_spec) = setup_test_boilerplate(&genesis_json).await?;
+    let executor = tasks.executor();
+
+    let node_config = test_node_config(chain_spec.clone());
+    let NodeHandle {
+        node,
+        node_exit_future: _,
+    } = NodeBuilder::new(node_config)
+        .testing_node(executor.clone())
+        .node(conduit_op_reth_node::node::ConduitOpNode::default())
+        .launch()
+        .await?;
+    let mut ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
 
     // Encode getValue() call.
     let calldata: Bytes = OverrideTestV1::getValueCall {}.abi_encode().into();
@@ -331,25 +422,17 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
     };
 
     // Block 1: before fork activation — V1 is deployed, getValue() should return 42.
-    ctx.advance_block().await?;
-    let ret = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let result = EthCall::call(
-                ctx.rpc.inner.eth_api(),
-                call_request.clone().into(),
-                None,
-                EvmOverrides::default(),
-            )
-            .await?;
-            if let Ok(ret) = OverrideTestV1::getValueCall::abi_decode_returns(&result) {
-                if ret == U256::from(42) {
-                    return Ok::<U256, eyre::Report>(ret);
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await??;
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
+    let result = EthCall::call(
+        ctx.rpc.inner.eth_api(),
+        call_request.clone().into(),
+        None,
+        EvmOverrides::default(),
+    )
+    .await?;
+    let ret = OverrideTestV1::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(
         ret,
         U256::from(42),
@@ -357,25 +440,17 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
     );
 
     // Block 2: fork activates — V2 bytecode is injected, getValue() should return 99.
-    ctx.advance_block().await?;
-    let ret = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let result = EthCall::call(
-                ctx.rpc.inner.eth_api(),
-                call_request.clone().into(),
-                None,
-                EvmOverrides::default(),
-            )
-            .await?;
-            if let Ok(ret) = OverrideTestV2::getValueCall::abi_decode_returns(&result) {
-                if ret == U256::from(99) {
-                    return Ok::<U256, eyre::Report>(ret);
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await??;
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
+    let result = EthCall::call(
+        ctx.rpc.inner.eth_api(),
+        call_request.clone().into(),
+        None,
+        EvmOverrides::default(),
+    )
+    .await?;
+    let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(
         ret,
         U256::from(99),
@@ -383,25 +458,17 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
     );
 
     // Block 3: post-activation — still V2.
-    ctx.advance_block().await?;
-    let ret = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let result = EthCall::call(
-                ctx.rpc.inner.eth_api(),
-                call_request.clone().into(),
-                None,
-                EvmOverrides::default(),
-            )
-            .await?;
-            if let Ok(ret) = OverrideTestV2::getValueCall::abi_decode_returns(&result) {
-                if ret == U256::from(99) {
-                    return Ok::<U256, eyre::Report>(ret);
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await??;
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
+    let result = EthCall::call(
+        ctx.rpc.inner.eth_api(),
+        call_request.into(),
+        None,
+        EvmOverrides::default(),
+    )
+    .await?;
+    let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(
         ret,
         U256::from(99),
@@ -438,11 +505,24 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
         }),
         None,
     );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec);
+    let (tasks, chain_spec) = setup_test_boilerplate(&genesis_json).await?;
+    let executor = tasks.executor();
+
+    let node_config = test_node_config(chain_spec.clone());
+    let NodeHandle {
+        node,
+        node_exit_future: _,
+    } = NodeBuilder::new(node_config)
+        .testing_node(executor.clone())
+        .node(conduit_op_reth_node::node::ConduitOpNode::default())
+        .launch()
+        .await?;
+    let mut ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
 
     // Block 1: before fork — neither address should have code.
-    ctx.advance_block().await?;
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
     let state = ctx.inner.provider.latest()?;
     assert!(
         state.account_code(&addr_a)?.is_none(),
@@ -459,16 +539,56 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
     );
 
     // Block 2: fork activates — both addresses should be overridden.
-    ctx.advance_block().await?;
-    wait_for_code!(ctx, addr_a, TARGET_BYTECODE);
-    wait_for_code!(ctx, addr_b, &[0xfe, 0xfe]);
-    wait_for_storage!(ctx, addr_b, STORAGE_SLOT, U256::from(0xff));
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
+    let state = ctx.inner.provider.latest()?;
+
+    let code_a = state
+        .account_code(&addr_a)?
+        .expect("addr_a should have code at activation");
+    assert_eq!(
+        code_a.original_bytes(),
+        Bytes::from_static(TARGET_BYTECODE),
+        "addr_a: bytecode should match"
+    );
+
+    let code_b = state
+        .account_code(&addr_b)?
+        .expect("addr_b should have code at activation");
+    assert_eq!(
+        code_b.original_bytes(),
+        Bytes::from_static(&[0xfe, 0xfe]),
+        "addr_b: bytecode should match"
+    );
+    let val = state.storage(addr_b, STORAGE_SLOT)?;
+    assert_eq!(
+        val,
+        Some(U256::from(0xff)),
+        "addr_b: storage slot should be set"
+    );
 
     // Block 3: post-activation — both persist.
-    ctx.advance_block().await?;
-    wait_for_code!(ctx, addr_a, TARGET_BYTECODE);
-    wait_for_code!(ctx, addr_b, &[0xfe, 0xfe]);
-    wait_for_storage!(ctx, addr_b, STORAGE_SLOT, U256::from(0xff));
+    let payload = ctx.advance_block().await?;
+    ctx.wait_block(payload.block().number, payload.block().hash(), false)
+        .await?;
+    let state = ctx.inner.provider.latest()?;
+
+    let code_a = state
+        .account_code(&addr_a)?
+        .expect("addr_a: code should persist");
+    assert_eq!(code_a.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
+
+    let code_b = state
+        .account_code(&addr_b)?
+        .expect("addr_b: code should persist");
+    assert_eq!(code_b.original_bytes(), Bytes::from_static(&[0xfe, 0xfe]));
+    let val = state.storage(addr_b, STORAGE_SLOT)?;
+    assert_eq!(
+        val,
+        Some(U256::from(0xff)),
+        "addr_b: storage should persist"
+    );
 
     Ok(())
 }

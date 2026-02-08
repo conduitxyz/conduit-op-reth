@@ -5,10 +5,13 @@ use alloy_signer_local::PrivateKeySigner;
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_e2e_test_utils::transaction::TransactionTestContext;
+use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
 use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::WithEncoded;
+use reth_tasks::TaskManager;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod state_override_test;
 
@@ -104,6 +107,18 @@ pub fn build_genesis_with_override(
     let mut genesis: serde_json::Value =
         serde_json::from_str(BASE_GENESIS).expect("failed to parse base genesis");
 
+    // Ensure genesis extra data is valid for Jovian (active at time=0 in saigon genesis).
+    // Jovian extra data is 17 bytes: version=1, eip1559 params, min_base_fee.
+    // We encode zeros for params/min base fee, which signals defaults.
+    if let Some(obj) = genesis.as_object_mut() {
+        // Normalize to the canonical key expected by alloy_genesis (`extraData`).
+        obj.remove("extradata");
+        obj.insert(
+            "extraData".to_string(),
+            serde_json::Value::String("0x0100000000000000000000000000000000".to_string()),
+        );
+    }
+
     genesis["config"]["conduit"] = serde_json::json!({
         "stateOverrideFork0": {
             "time": fork_time,
@@ -125,12 +140,15 @@ pub fn build_genesis_with_override(
 
 /// Parse a genesis JSON string into an Arc<ConduitOpChainSpec> via a temp file.
 pub fn parse_chain_spec(genesis_json: &str) -> Arc<ConduitOpChainSpec> {
+    static GENESIS_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = GENESIS_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "conduit-op-e2e-{}",
+        "conduit-op-e2e-{}-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        unique,
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("genesis.json");
@@ -141,44 +159,44 @@ pub fn parse_chain_spec(genesis_json: &str) -> Arc<ConduitOpChainSpec> {
     spec
 }
 
-/// Launch a test node and produce a `(TaskManager, NodeTestContext)`.
-///
-/// This is a macro because `NodeBuilder::launch()` returns `impl` types that cannot
-/// be named in a function signature. Expanding inline lets the compiler infer everything.
-///
-/// **Important**: The returned `TaskManager` must be held alive for the duration of the test;
-/// dropping it shuts down the node's background tasks.
-macro_rules! launch_test_node {
-    ($chain_spec:expr) => {{
-        use reth_e2e_test_utils::node::NodeTestContext;
-        use reth_node_builder::{NodeBuilder, NodeHandle};
-        use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
-        use reth_tasks::TaskManager;
-
-        let tasks = TaskManager::current();
-        let mut node_config = NodeConfig::new($chain_spec)
-            .with_unused_ports()
-            .with_disabled_discovery()
-            .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
-
-        node_config.engine.persistence_threshold = 0;
-        node_config.engine.memory_block_buffer_target = 0;
-
-        let NodeHandle {
-            node,
-            node_exit_future: _,
-        } = NodeBuilder::new(node_config)
-            .testing_node(tasks.executor())
-            .node(conduit_op_reth_node::node::ConduitOpNode::default())
-            .launch()
-            .await?;
-
-        let ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
-        (tasks, ctx)
-    }};
+/// Setup test boilerplate - returns TaskManager and chain spec for individual test setup.
+pub async fn setup_test_boilerplate(
+    genesis_json: &str,
+) -> eyre::Result<(TaskManager, Arc<ConduitOpChainSpec>)> {
+    let tasks = TaskManager::current();
+    let chain_spec = parse_chain_spec(genesis_json);
+    Ok((tasks, chain_spec))
 }
 
-pub(crate) use launch_test_node;
+/// Build a NodeConfig with the test overrides we use for e2e stability.
+pub fn test_node_config(chain_spec: Arc<ConduitOpChainSpec>) -> NodeConfig<ConduitOpChainSpec> {
+    let mut node_config = NodeConfig::new(chain_spec)
+        .with_unused_ports()
+        .with_disabled_discovery()
+        .with_disabled_rpc_cache()
+        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+
+    node_config.engine.persistence_threshold = 0;
+    node_config.engine.memory_block_buffer_target = 0;
+    node_config.engine.state_cache_disabled = true;
+    node_config.engine.prewarming_disabled = true;
+    node_config.engine.parallel_sparse_trie_disabled = true;
+    node_config.engine.state_root_fallback = true;
+    node_config.engine.state_root_task_compare_updates = true;
+    node_config.engine.storage_worker_count = Some(1);
+    node_config.engine.account_worker_count = Some(1);
+
+    node_config.builder.max_payload_tasks = 1;
+
+    node_config.db.read_transaction_timeout = Some(0);
+    node_config.db.sync_mode = Some(reth_db::mdbx::SyncMode::SafeNoSync);
+
+    node_config.network.no_persist_peers = true;
+    node_config.network.disable_tx_gossip = true;
+    node_config.network.max_peers = Some(0);
+
+    node_config
+}
 
 /// Build a signed CREATE transaction and return the raw RLP-encoded bytes.
 ///
@@ -189,7 +207,9 @@ pub async fn create_deploy_tx(chain_id: u64, init_code: Bytes, wallet: PrivateKe
         nonce: Some(0),
         chain_id: Some(chain_id),
         gas: Some(100_000),
-        max_fee_per_gas: Some(20_000_000_000u128),
+        // Keep fees comfortably above the saigon genesis base fee (~250 gwei) so the tx is
+        // immediately includable.
+        max_fee_per_gas: Some(1_000_000_000_000u128),
         max_priority_fee_per_gas: Some(1_000_000_000u128),
         to: Some(TxKind::Create),
         input: TransactionInput {
