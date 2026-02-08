@@ -25,6 +25,7 @@ macro_rules! advance {
     }};
 }
 
+/// Bytecode-only override: absent before fork, injected at activation, persists after.
 #[tokio::test]
 async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -65,6 +66,8 @@ async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()
     Ok(())
 }
 
+/// Code + storage override on a fresh address: both absent before fork, applied at
+/// activation, persist after.
 #[tokio::test]
 async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -110,6 +113,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
     Ok(())
 }
 
+/// Override applies bytecode without clobbering a pre-existing genesis balance.
 #[tokio::test]
 async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

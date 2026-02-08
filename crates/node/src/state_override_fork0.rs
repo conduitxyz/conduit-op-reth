@@ -152,6 +152,7 @@ mod tests {
         StateOverrideFork0Config { updates }
     }
 
+    /// Core happy-path: bytecode injected at exact transition timestamp.
     #[test]
     fn injects_bytecode_at_transition_block() {
         let spec = MockSpec {
@@ -169,6 +170,7 @@ mod tests {
         assert_eq!(info.code.unwrap().original_bytes(), *bytecode);
     }
 
+    /// Mixed config: both code and storage slots applied in a single override entry.
     #[test]
     fn applies_bytecode_and_storage_together() {
         let spec = MockSpec {
@@ -188,6 +190,7 @@ mod tests {
         assert_eq!(slot, U256::from(0xaa));
     }
 
+    /// Timestamp before fork activation → no state changes.
     #[test]
     fn no_op_before_activation() {
         let spec = MockSpec {
@@ -202,6 +205,9 @@ mod tests {
         assert!(info.is_none(), "should not apply before fork activates");
     }
 
+    /// Timestamp past the transition window → complete no-op (no account created).
+    /// Differs from `does_not_reapply_after_transition` which verifies existing state
+    /// isn't clobbered; this test verifies no state is touched at all.
     #[test]
     fn no_op_after_transition() {
         let spec = MockSpec {
@@ -309,6 +315,9 @@ mod tests {
         );
     }
 
+    /// Override applied at transition, then code changed externally — a later block
+    /// must not revert it. Differs from `no_op_after_transition` which verifies the
+    /// guard on a clean DB; this verifies post-transition state isn't clobbered.
     #[test]
     fn does_not_reapply_after_transition() {
         let spec = MockSpec {
@@ -340,6 +349,7 @@ mod tests {
         );
     }
 
+    /// Fork time = None → no-op regardless of timestamp.
     #[test]
     fn no_op_when_fork_not_configured() {
         let spec = MockSpec { fork_time: None };
