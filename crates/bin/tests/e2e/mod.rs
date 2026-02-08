@@ -93,14 +93,14 @@ pub fn build_genesis_with_override(
     let mut genesis: serde_json::Value =
         serde_json::from_str(BASE_GENESIS).expect("failed to parse base genesis");
 
-    // Jovian extra data: 17 bytes (version=1, zeros for eip1559 params/min base fee).
-    if let Some(obj) = genesis.as_object_mut() {
-        obj.remove("extradata");
-        obj.insert(
-            "extraData".to_string(),
-            serde_json::Value::String("0x0100000000000000000000000000000000".to_string()),
-        );
-    }
+    // // Jovian extra data: 17 bytes (version=1, zeros for eip1559 params/min base fee).
+    // if let Some(obj) = genesis.as_object_mut() {
+    //     obj.remove("extradata");
+    //     obj.insert(
+    //         "extraData".to_string(),
+    //         serde_json::Value::String("0x0100000000000000000000000000000000".to_string()),
+    //     );
+    // }
 
     genesis["config"]["conduit"] = serde_json::json!({
         "stateOverrideFork0": {
