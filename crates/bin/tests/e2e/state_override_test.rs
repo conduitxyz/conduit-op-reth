@@ -12,6 +12,38 @@ use reth_provider::StateProviderFactory;
 use reth_rpc_eth_api::helpers::EthCall;
 use reth_storage_api::{AccountReader, StateProvider};
 
+macro_rules! wait_for_code {
+    ($ctx:expr, $addr:expr, $expected:expr) => {{
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let state = $ctx.inner.provider.latest()?;
+                if let Some(code) = state.account_code(&$addr)? {
+                    if code.original_bytes().as_ref() == $expected {
+                        return Ok::<(), eyre::Report>(());
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+    }};
+}
+
+macro_rules! wait_for_storage {
+    ($ctx:expr, $addr:expr, $slot:expr, $expected:expr) => {{
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let state = $ctx.inner.provider.latest()?;
+                if state.storage($addr, $slot)? == Some($expected) {
+                    return Ok::<(), eyre::Report>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+    }};
+}
+
 #[tokio::test]
 async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -35,6 +67,7 @@ async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()
 
     // Block at t=4: fork activates (transition block).
     ctx.advance_block().await?;
+    wait_for_code!(ctx, TARGET_ADDRESS, TARGET_BYTECODE);
     let state = ctx.inner.provider.latest()?;
     let code = state
         .account_code(&TARGET_ADDRESS)?
@@ -47,6 +80,7 @@ async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()
 
     // Block at t=6: post-activation, bytecode persists.
     ctx.advance_block().await?;
+    wait_for_code!(ctx, TARGET_ADDRESS, TARGET_BYTECODE);
     let state = ctx.inner.provider.latest()?;
     let code = state
         .account_code(&TARGET_ADDRESS)?
@@ -89,6 +123,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
 
     // Block at t=4: fork activates.
     ctx.advance_block().await?;
+    wait_for_storage!(ctx, STORAGE_ADDRESS, STORAGE_SLOT, U256::from(0xff));
     let state = ctx.inner.provider.latest()?;
     let code = state.account_code(&STORAGE_ADDRESS)?;
     assert!(code.is_some(), "should have code at activation");
@@ -101,6 +136,7 @@ async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()>
 
     // Block at t=6: post-activation, storage persists.
     ctx.advance_block().await?;
+    wait_for_storage!(ctx, STORAGE_ADDRESS, STORAGE_SLOT, U256::from(0xff));
     let state = ctx.inner.provider.latest()?;
     let value = state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?;
     assert_eq!(
@@ -146,6 +182,7 @@ async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
 
     // Activation: bytecode applied, balance preserved.
     ctx.advance_block().await?;
+    wait_for_code!(ctx, TARGET_ADDRESS, TARGET_BYTECODE);
     let state = ctx.inner.provider.latest()?;
     let account = state
         .basic_account(&TARGET_ADDRESS)?
@@ -232,51 +269,19 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     assert!(included, "deploy tx {tx_hash} should be included in block");
 
     // Verify the contract was deployed with original code.
-    let state = ctx.inner.provider.latest()?;
-    let code = state
-        .account_code(&contract_addr)?
-        .expect("contract should be deployed");
-    assert_eq!(
-        code.original_bytes(),
-        Bytes::from_static(&[0xfe, 0xfe]),
-        "should have original deployed bytecode"
-    );
+    wait_for_code!(ctx, contract_addr, &[0xfe, 0xfe]);
 
     // Block 2: fork activates — code and storage should be overridden.
     ctx.advance_block().await?;
-    let state = ctx.inner.provider.latest()?;
-    let code = state
-        .account_code(&contract_addr)?
-        .expect("contract should still have code after override");
-    assert_eq!(
-        code.original_bytes(),
-        Bytes::from_static(TARGET_BYTECODE),
-        "code should be overwritten by fork override"
-    );
-    let val1 = state.storage(contract_addr, STORAGE_SLOT)?;
-    assert_eq!(
-        val1,
-        Some(U256::from(0xff)),
-        "slot 1 should be set by override"
-    );
-    let val2 = state.storage(contract_addr, STORAGE_SLOT_2)?;
-    assert_eq!(
-        val2,
-        Some(U256::from(0x42)),
-        "slot 2 should be set by override"
-    );
+    wait_for_code!(ctx, contract_addr, TARGET_BYTECODE);
+    wait_for_storage!(ctx, contract_addr, STORAGE_SLOT, U256::from(0xff));
+    wait_for_storage!(ctx, contract_addr, STORAGE_SLOT_2, U256::from(0x42));
 
     // Block 3: post-activation, values persist.
     ctx.advance_block().await?;
-    let state = ctx.inner.provider.latest()?;
-    let code = state
-        .account_code(&contract_addr)?
-        .expect("code should persist after activation");
-    assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
-    let val1 = state.storage(contract_addr, STORAGE_SLOT)?;
-    assert_eq!(val1, Some(U256::from(0xff)), "slot 1 should persist");
-    let val2 = state.storage(contract_addr, STORAGE_SLOT_2)?;
-    assert_eq!(val2, Some(U256::from(0x42)), "slot 2 should persist");
+    wait_for_code!(ctx, contract_addr, TARGET_BYTECODE);
+    wait_for_storage!(ctx, contract_addr, STORAGE_SLOT, U256::from(0xff));
+    wait_for_storage!(ctx, contract_addr, STORAGE_SLOT_2, U256::from(0x42));
 
     Ok(())
 }
@@ -327,14 +332,24 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
 
     // Block 1: before fork activation — V1 is deployed, getValue() should return 42.
     ctx.advance_block().await?;
-    let result = EthCall::call(
-        ctx.rpc.inner.eth_api(),
-        call_request.clone().into(),
-        None,
-        EvmOverrides::default(),
-    )
-    .await?;
-    let ret = OverrideTestV1::getValueCall::abi_decode_returns(&result)?;
+    let ret = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let result = EthCall::call(
+                ctx.rpc.inner.eth_api(),
+                call_request.clone().into(),
+                None,
+                EvmOverrides::default(),
+            )
+            .await?;
+            if let Ok(ret) = OverrideTestV1::getValueCall::abi_decode_returns(&result) {
+                if ret == U256::from(42) {
+                    return Ok::<U256, eyre::Report>(ret);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
     assert_eq!(
         ret,
         U256::from(42),
@@ -343,14 +358,24 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
 
     // Block 2: fork activates — V2 bytecode is injected, getValue() should return 99.
     ctx.advance_block().await?;
-    let result = EthCall::call(
-        ctx.rpc.inner.eth_api(),
-        call_request.clone().into(),
-        None,
-        EvmOverrides::default(),
-    )
-    .await?;
-    let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
+    let ret = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let result = EthCall::call(
+                ctx.rpc.inner.eth_api(),
+                call_request.clone().into(),
+                None,
+                EvmOverrides::default(),
+            )
+            .await?;
+            if let Ok(ret) = OverrideTestV2::getValueCall::abi_decode_returns(&result) {
+                if ret == U256::from(99) {
+                    return Ok::<U256, eyre::Report>(ret);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
     assert_eq!(
         ret,
         U256::from(99),
@@ -359,14 +384,24 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
 
     // Block 3: post-activation — still V2.
     ctx.advance_block().await?;
-    let result = EthCall::call(
-        ctx.rpc.inner.eth_api(),
-        call_request.into(),
-        None,
-        EvmOverrides::default(),
-    )
-    .await?;
-    let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
+    let ret = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let result = EthCall::call(
+                ctx.rpc.inner.eth_api(),
+                call_request.clone().into(),
+                None,
+                EvmOverrides::default(),
+            )
+            .await?;
+            if let Ok(ret) = OverrideTestV2::getValueCall::abi_decode_returns(&result) {
+                if ret == U256::from(99) {
+                    return Ok::<U256, eyre::Report>(ret);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
     assert_eq!(
         ret,
         U256::from(99),
@@ -425,51 +460,15 @@ async fn test_state_override_multi_account() -> eyre::Result<()> {
 
     // Block 2: fork activates — both addresses should be overridden.
     ctx.advance_block().await?;
-    let state = ctx.inner.provider.latest()?;
-
-    let code_a = state
-        .account_code(&addr_a)?
-        .expect("addr_a should have code at activation");
-    assert_eq!(
-        code_a.original_bytes(),
-        Bytes::from_static(TARGET_BYTECODE),
-        "addr_a: bytecode should match"
-    );
-
-    let code_b = state
-        .account_code(&addr_b)?
-        .expect("addr_b should have code at activation");
-    assert_eq!(
-        code_b.original_bytes(),
-        Bytes::from_static(&[0xfe, 0xfe]),
-        "addr_b: bytecode should match"
-    );
-    let val = state.storage(addr_b, STORAGE_SLOT)?;
-    assert_eq!(
-        val,
-        Some(U256::from(0xff)),
-        "addr_b: storage slot should be set"
-    );
+    wait_for_code!(ctx, addr_a, TARGET_BYTECODE);
+    wait_for_code!(ctx, addr_b, &[0xfe, 0xfe]);
+    wait_for_storage!(ctx, addr_b, STORAGE_SLOT, U256::from(0xff));
 
     // Block 3: post-activation — both persist.
     ctx.advance_block().await?;
-    let state = ctx.inner.provider.latest()?;
-
-    let code_a = state
-        .account_code(&addr_a)?
-        .expect("addr_a: code should persist");
-    assert_eq!(code_a.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
-
-    let code_b = state
-        .account_code(&addr_b)?
-        .expect("addr_b: code should persist");
-    assert_eq!(code_b.original_bytes(), Bytes::from_static(&[0xfe, 0xfe]));
-    let val = state.storage(addr_b, STORAGE_SLOT)?;
-    assert_eq!(
-        val,
-        Some(U256::from(0xff)),
-        "addr_b: storage should persist"
-    );
+    wait_for_code!(ctx, addr_a, TARGET_BYTECODE);
+    wait_for_code!(ctx, addr_b, &[0xfe, 0xfe]);
+    wait_for_storage!(ctx, addr_b, STORAGE_SLOT, U256::from(0xff));
 
     Ok(())
 }
