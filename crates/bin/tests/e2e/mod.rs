@@ -12,6 +12,7 @@ use reth_primitives_traits::WithEncoded;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod genesis_validation_test;
 pub mod state_override_test;
 
 // ABI + deployed bytecodes for OverrideTestV1 (VALUE = 42) and OverrideTestV2 (VALUE = 99).
