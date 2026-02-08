@@ -147,20 +147,10 @@ fn test_node_config(chain_spec: Arc<ConduitOpChainSpec>) -> NodeConfig<ConduitOp
 
     c.engine.persistence_threshold = 0;
     c.engine.memory_block_buffer_target = 0;
-    c.engine.state_cache_disabled = true;
     c.engine.prewarming_disabled = true;
-    c.engine.parallel_sparse_trie_disabled = true;
-    c.engine.state_root_fallback = true;
-    c.engine.state_root_task_compare_updates = true;
-    c.engine.storage_worker_count = Some(1);
-    c.engine.account_worker_count = Some(1);
-    c.builder.max_payload_tasks = 1;
-    c.db.read_transaction_timeout = Some(0);
-    c.db.sync_mode = Some(reth_db::mdbx::SyncMode::SafeNoSync);
     c.network.no_persist_peers = true;
     c.network.disable_tx_gossip = true;
     c.network.max_peers = Some(0);
-
     c
 }
 
