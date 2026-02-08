@@ -15,19 +15,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub mod genesis_validation_test;
 pub mod state_override_test;
 
-// ABI + deployed bytecodes for OverrideTestV1 (VALUE = 42) and OverrideTestV2 (VALUE = 99).
-// Compiled from rez-contracts/src/OverrideTest.sol with solc 0.8.33.
+// deployed bytecodes for OverrideTestV1 (VALUE = 42) and OverrideTestV2 (VALUE = 99).
 alloy_sol_macro::sol! {
     #[sol(deployed_bytecode = "0x6080604052348015600e575f5ffd5b50600436106030575f3560e01c806320965255146034578063509d8c7214604e575b5f5ffd5b603a6068565b60405160459190608b565b60405180910390f35b60546070565b604051605f9190608b565b60405180910390f35b5f602a905090565b602a81565b5f819050919050565b6085816075565b82525050565b5f602082019050609c5f830184607e565b9291505056fea2646970667358221220a878e13f3fe81d198d4cc2c8716b34cd19d74f6fa7f34366a55ae658dc08bd3c64736f6c63430008210033")]
     contract OverrideTestV1 {
-        function getValue() external pure returns (uint256);
+        uint256 public constant VALUE = 42;
+        function getValue() external pure returns (uint256) {
+            return VALUE;
+        }
     }
 }
 
 alloy_sol_macro::sol! {
     #[sol(deployed_bytecode = "0x6080604052348015600e575f5ffd5b50600436106030575f3560e01c806320965255146034578063509d8c7214604e575b5f5ffd5b603a6068565b60405160459190608b565b60405180910390f35b60546070565b604051605f9190608b565b60405180910390f35b5f6063905090565b606381565b5f819050919050565b6085816075565b82525050565b5f602082019050609c5f830184607e565b9291505056fea2646970667358221220572d53ef774c53414dd4f8118dde0e1f3f5a02736b33f5b85bf890fed04a9c2364736f6c63430008210033")]
     contract OverrideTestV2 {
-        function getValue() external pure returns (uint256);
+        uint256 public constant VALUE = 99;
+        function getValue() external pure returns (uint256) {
+            return VALUE;
+        }
     }
 }
 

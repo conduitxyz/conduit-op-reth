@@ -19,4 +19,4 @@ clippy:
 
 test:
 	@echo "Running tests..."
-	cargo test --workspace -- --test-threads=1
+	cargo test --workspace
