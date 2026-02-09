@@ -303,33 +303,39 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
         ..Default::default()
     };
 
-    macro_rules! eth_call {
-        ($ctx:expr, $req:expr) => {
-            EthCall::call(
-                $ctx.rpc.inner.eth_api(),
-                $req.into(),
-                None,
-                EvmOverrides::default(),
-            )
-            .await
-        };
-    }
-
     // Block 1: V1 deployed, getValue() -> 42.
     advance!(ctx);
-    let result = eth_call!(ctx, call_request.clone())?;
+    let result = EthCall::call(
+        ctx.rpc.inner.eth_api(),
+        call_request.clone().into(),
+        None,
+        EvmOverrides::default(),
+    )
+    .await?;
     let ret = OverrideTestV1::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(ret, U256::from(42));
 
     // Block 2: fork activates, V2 injected, getValue() -> 99.
     advance!(ctx);
-    let result = eth_call!(ctx, call_request.clone())?;
+    let result = EthCall::call(
+        ctx.rpc.inner.eth_api(),
+        call_request.clone().into(),
+        None,
+        EvmOverrides::default(),
+    )
+    .await?;
     let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(ret, U256::from(99));
 
     // Block 3: still V2.
     advance!(ctx);
-    let result = eth_call!(ctx, call_request)?;
+    let result = EthCall::call(
+        ctx.rpc.inner.eth_api(),
+        call_request.into(),
+        None,
+        EvmOverrides::default(),
+    )
+    .await?;
     let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(ret, U256::from(99));
 
