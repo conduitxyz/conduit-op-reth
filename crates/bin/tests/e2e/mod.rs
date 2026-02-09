@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, B64, B256, Bytes, address, b256};
+use alloy_primitives::{Address, B64, B256, Bytes, b256};
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
@@ -10,10 +10,9 @@ use std::sync::Arc;
 pub mod genesis_validation_test;
 pub mod state_override_test;
 
-pub const TARGET_ADDRESS: Address = address!("4200000000000000000000000000000000000042");
+/// Solidity contract preamble: PUSH1 0x80 PUSH1 0x40 MSTORE.
 pub const TARGET_BYTECODE: &[u8] = &[0x60, 0x80, 0x60, 0x40, 0x52];
-pub const STORAGE_ADDRESS: Address = address!("4200000000000000000000000000000000000099");
-pub const STORAGE_SLOT: B256 =
+pub const STORAGE_SLOT_1: B256 =
     b256!("0000000000000000000000000000000000000000000000000000000000000001");
 pub const STORAGE_SLOT_2: B256 =
     b256!("0000000000000000000000000000000000000000000000000000000000000002");
@@ -152,3 +151,18 @@ macro_rules! launch_test_node {
 }
 
 pub(crate) use launch_test_node;
+
+/// Advance one block and wait for it to be committed.
+///
+/// `advance_block()` returns before the pipeline finishes. `wait_block()` polls
+/// until the block header is available, ensuring `provider.latest()` is up to date.
+macro_rules! advance {
+    ($ctx:expr) => {{
+        let payload = $ctx.advance_block().await?;
+        $ctx.wait_block(payload.block().number, payload.block().hash(), false)
+            .await?;
+        payload
+    }};
+}
+
+pub(crate) use advance;

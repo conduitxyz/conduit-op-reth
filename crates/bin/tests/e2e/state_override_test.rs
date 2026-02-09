@@ -1,7 +1,7 @@
 use crate::e2e::{
-    FORK_ACTIVATION_TIMESTAMP, PREFUND_BALANCE, PREFUND_BALANCE_U256, STORAGE_ADDRESS,
-    STORAGE_SLOT, STORAGE_SLOT_2, TARGET_ADDRESS, TARGET_BYTECODE, build_genesis_with_override,
-    launch_test_node, parse_chain_spec,
+    FORK_ACTIVATION_TIMESTAMP, PREFUND_BALANCE, PREFUND_BALANCE_U256, STORAGE_SLOT_1,
+    STORAGE_SLOT_2, TARGET_BYTECODE, advance, build_genesis_with_override, launch_test_node,
+    parse_chain_spec,
 };
 use alloy_eips::Encodable2718;
 use alloy_primitives::{Bytes, TxKind, U256, address};
@@ -46,142 +46,89 @@ async fn create_deploy_tx(chain_id: u64, init_code: Bytes, wallet: PrivateKeySig
     signed.encoded_2718().into()
 }
 
-/// Advance one block and wait for it to be committed.
-///
-/// `advance_block()` returns before the pipeline finishes. `wait_block()` polls
-/// until the block header is available, ensuring `provider.latest()` is up to date.
-macro_rules! advance {
-    ($ctx:expr) => {{
-        let payload = $ctx.advance_block().await?;
-        $ctx.wait_block(payload.block().number, payload.block().hash(), false)
-            .await?;
-        payload
-    }};
-}
-
-/// Bytecode-only override: absent before fork, injected at activation, persists after.
+/// Consolidates the core override scenarios: multi-account override (code-only vs code+storage),
+/// balance preservation on an address with a pre-existing genesis alloc, and 3-block persistence.
 #[tokio::test]
-async fn test_state_override_bytecode_applied_at_activation() -> eyre::Result<()> {
+async fn test_state_override_applied_at_activation() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
+
+    // addr_a: fresh address, code + storage override.
+    // addr_b: has a pre-existing genesis balance, code-only override (tests balance preservation).
+    let addr_a = address!("aAaA000000000000000000000000000000000001");
+    let addr_b = address!("bBbB000000000000000000000000000000000002");
+
     let genesis_json = build_genesis_with_override(
         FORK_ACTIVATION_TIMESTAMP,
         serde_json::json!({
-            "0x4200000000000000000000000000000000000042": { "code": "0x6080604052" }
-        }),
-        None,
-    );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec);
-
-    // Block 1: fork not yet active.
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    assert!(
-        state.account_code(&TARGET_ADDRESS)?.is_none(),
-        "should have no code before activation"
-    );
-
-    // Block 2: fork activates (transition block).
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    let code = state
-        .account_code(&TARGET_ADDRESS)?
-        .expect("should have code at activation");
-    assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
-
-    // Block 3: bytecode persists.
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    let code = state
-        .account_code(&TARGET_ADDRESS)?
-        .expect("should have code after activation");
-    assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
-
-    Ok(())
-}
-
-/// Code + storage override on a fresh address: both absent before fork, applied at
-/// activation, persist after.
-#[tokio::test]
-async fn test_state_override_storage_applied_at_activation() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-    let genesis_json = build_genesis_with_override(
-        FORK_ACTIVATION_TIMESTAMP,
-        serde_json::json!({
-            "0x4200000000000000000000000000000000000099": {
+            format!("{addr_a}"): {
                 "code": "0x6080604052",
                 "storage": {
                     "0x0000000000000000000000000000000000000000000000000000000000000001":
                         "0x00000000000000000000000000000000000000000000000000000000000000ff"
                 }
-            }
-        }),
-        None,
-    );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec);
-
-    // Block 1: fork not yet active.
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    assert!(state.account_code(&STORAGE_ADDRESS)?.is_none());
-    assert_eq!(state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?, None);
-
-    // Block 2: fork activates.
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    assert!(state.account_code(&STORAGE_ADDRESS)?.is_some());
-    assert_eq!(
-        state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?,
-        Some(U256::from(0xff))
-    );
-
-    // Block 3: storage persists.
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    assert_eq!(
-        state.storage(STORAGE_ADDRESS, STORAGE_SLOT)?,
-        Some(U256::from(0xff))
-    );
-
-    Ok(())
-}
-
-/// Override applies bytecode without clobbering a pre-existing genesis balance.
-#[tokio::test]
-async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-    let genesis_json = build_genesis_with_override(
-        FORK_ACTIVATION_TIMESTAMP,
-        serde_json::json!({
-            "0x4200000000000000000000000000000000000042": { "code": "0x6080604052" }
+            },
+            format!("{addr_b}"): { "code": "0xfefe" }
         }),
         Some(serde_json::json!({
-            "0x4200000000000000000000000000000000000042": { "balance": PREFUND_BALANCE }
+            format!("{addr_b}"): { "balance": PREFUND_BALANCE }
         })),
     );
     let chain_spec = parse_chain_spec(&genesis_json);
     let (_tasks, mut ctx) = launch_test_node!(chain_spec);
 
-    // Block 1: balance from genesis alloc.
+    // Block 1: fork not yet active — no overrides applied.
     advance!(ctx);
     let state = ctx.inner.provider.latest()?;
-    let account = state
-        .basic_account(&TARGET_ADDRESS)?
-        .expect("account should exist from genesis alloc");
-    assert_eq!(account.balance, PREFUND_BALANCE_U256);
+    assert!(state.account_code(&addr_a)?.is_none());
+    assert_eq!(state.storage(addr_a, STORAGE_SLOT_1)?, None);
+    assert!(state.account_code(&addr_b)?.is_none());
+    assert_eq!(
+        state
+            .basic_account(&addr_b)?
+            .expect("addr_b from genesis alloc")
+            .balance,
+        PREFUND_BALANCE_U256
+    );
 
-    // Block 2: fork activates — balance preserved, bytecode applied.
+    // Block 2: fork activates — both overrides applied, balance preserved.
     advance!(ctx);
     let state = ctx.inner.provider.latest()?;
-    let account = state
-        .basic_account(&TARGET_ADDRESS)?
-        .expect("account should exist after activation");
-    assert_eq!(account.balance, PREFUND_BALANCE_U256);
-    let code = state
-        .account_code(&TARGET_ADDRESS)?
-        .expect("should have code at activation");
-    assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
+    assert_eq!(
+        state.account_code(&addr_a)?.unwrap().original_bytes(),
+        Bytes::from_static(TARGET_BYTECODE)
+    );
+    assert_eq!(
+        state.storage(addr_a, STORAGE_SLOT_1)?,
+        Some(U256::from(0xff))
+    );
+    assert_eq!(
+        state.account_code(&addr_b)?.unwrap().original_bytes(),
+        Bytes::from_static(&[0xfe, 0xfe])
+    );
+    assert_eq!(
+        state.basic_account(&addr_b)?.unwrap().balance,
+        PREFUND_BALANCE_U256,
+    );
+
+    // Block 3: all values persist.
+    advance!(ctx);
+    let state = ctx.inner.provider.latest()?;
+    assert_eq!(
+        state.account_code(&addr_a)?.unwrap().original_bytes(),
+        Bytes::from_static(TARGET_BYTECODE)
+    );
+    assert_eq!(
+        state.storage(addr_a, STORAGE_SLOT_1)?,
+        Some(U256::from(0xff))
+    );
+    assert_eq!(
+        state.account_code(&addr_b)?.unwrap().original_bytes(),
+        Bytes::from_static(&[0xfe, 0xfe])
+    );
+    assert_eq!(
+        state.basic_account(&addr_b)?.unwrap().balance,
+        PREFUND_BALANCE_U256,
+    );
 
     Ok(())
 }
@@ -278,7 +225,7 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
         .expect("should have code after override");
     assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
     assert_eq!(
-        state.storage(contract_addr, STORAGE_SLOT)?,
+        state.storage(contract_addr, STORAGE_SLOT_1)?,
         Some(U256::from(0xff))
     );
     assert_eq!(
@@ -294,7 +241,7 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
         .expect("code should persist");
     assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
     assert_eq!(
-        state.storage(contract_addr, STORAGE_SLOT)?,
+        state.storage(contract_addr, STORAGE_SLOT_1)?,
         Some(U256::from(0xff))
     );
     assert_eq!(
@@ -367,67 +314,6 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
     .await?;
     let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(ret, U256::from(99));
-
-    Ok(())
-}
-
-/// Multiple addresses overridden simultaneously at activation.
-#[tokio::test]
-async fn test_state_override_multi_account() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let addr_a = address!("aAaA000000000000000000000000000000000001");
-    let addr_b = address!("bBbB000000000000000000000000000000000002");
-
-    let genesis_json = build_genesis_with_override(
-        FORK_ACTIVATION_TIMESTAMP,
-        serde_json::json!({
-            format!("{addr_a}"): { "code": "0x6080604052" },
-            format!("{addr_b}"): {
-                "code": "0xfefe",
-                "storage": {
-                    "0x0000000000000000000000000000000000000000000000000000000000000001":
-                        "0x00000000000000000000000000000000000000000000000000000000000000ff"
-                }
-            }
-        }),
-        None,
-    );
-    let chain_spec = parse_chain_spec(&genesis_json);
-    let (_tasks, mut ctx) = launch_test_node!(chain_spec);
-
-    // Block 1: neither address has code.
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    assert!(state.account_code(&addr_a)?.is_none());
-    assert!(state.account_code(&addr_b)?.is_none());
-    assert_eq!(state.storage(addr_b, STORAGE_SLOT)?, None);
-
-    // Block 2: fork activates — both overridden.
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    assert_eq!(
-        state.account_code(&addr_a)?.unwrap().original_bytes(),
-        Bytes::from_static(TARGET_BYTECODE)
-    );
-    assert_eq!(
-        state.account_code(&addr_b)?.unwrap().original_bytes(),
-        Bytes::from_static(&[0xfe, 0xfe])
-    );
-    assert_eq!(state.storage(addr_b, STORAGE_SLOT)?, Some(U256::from(0xff)));
-
-    // Block 3: both persist.
-    advance!(ctx);
-    let state = ctx.inner.provider.latest()?;
-    assert_eq!(
-        state.account_code(&addr_a)?.unwrap().original_bytes(),
-        Bytes::from_static(TARGET_BYTECODE)
-    );
-    assert_eq!(
-        state.account_code(&addr_b)?.unwrap().original_bytes(),
-        Bytes::from_static(&[0xfe, 0xfe])
-    );
-    assert_eq!(state.storage(addr_b, STORAGE_SLOT)?, Some(U256::from(0xff)));
 
     Ok(())
 }
