@@ -1,7 +1,8 @@
 use crate::e2e::{
-    FORK_ACTIVATION_TIMESTAMP, OverrideTestV1, OverrideTestV2, PREFUND_BALANCE, STORAGE_ADDRESS,
-    STORAGE_SLOT, STORAGE_SLOT_2, TARGET_ADDRESS, TARGET_BYTECODE, build_genesis_with_override,
-    create_deploy_tx, launch_test_node, parse_chain_spec,
+    FORK_ACTIVATION_TIMESTAMP, OverrideTestV1, OverrideTestV2, PREFUND_BALANCE,
+    PREFUND_BALANCE_U256, STORAGE_ADDRESS, STORAGE_SLOT, STORAGE_SLOT_2, TARGET_ADDRESS,
+    TARGET_BYTECODE, build_genesis_with_override, create_deploy_tx, launch_test_node,
+    parse_chain_spec,
 };
 use alloy_primitives::{Bytes, TxKind, U256, address};
 use alloy_rpc_types_eth::{TransactionRequest, state::EvmOverrides};
@@ -129,15 +130,13 @@ async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
     let chain_spec = parse_chain_spec(&genesis_json);
     let (_tasks, mut ctx) = launch_test_node!(chain_spec);
 
-    let expected_balance = U256::from_str_radix("de0b6b3a7640000", 16).unwrap();
-
     // Block 1: balance from genesis alloc.
     advance!(ctx);
     let state = ctx.inner.provider.latest()?;
     let account = state
         .basic_account(&TARGET_ADDRESS)?
         .expect("account should exist from genesis alloc");
-    assert_eq!(account.balance, expected_balance);
+    assert_eq!(account.balance, PREFUND_BALANCE_U256);
 
     // Block 2: fork activates — balance preserved, bytecode applied.
     advance!(ctx);
@@ -145,7 +144,7 @@ async fn test_state_override_preserves_existing_balance() -> eyre::Result<()> {
     let account = state
         .basic_account(&TARGET_ADDRESS)?
         .expect("account should exist after activation");
-    assert_eq!(account.balance, expected_balance);
+    assert_eq!(account.balance, PREFUND_BALANCE_U256);
     let code = state
         .account_code(&TARGET_ADDRESS)?
         .expect("should have code at activation");

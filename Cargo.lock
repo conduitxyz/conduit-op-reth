@@ -2068,6 +2068,7 @@ dependencies = [
  "reth-tasks",
  "reth-tracing",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

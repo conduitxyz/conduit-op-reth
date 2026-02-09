@@ -9,7 +9,7 @@ use reth_node_builder::NodeTypes;
 async fn test_saigon_genesis_invalid_for_new_payload() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let genesis_json = include_str!("../../../../tests/fixtures/saigon-genesis.json");
+    let genesis_json = super::BASE_GENESIS;
     let chain_spec = parse_chain_spec(genesis_json);
 
     // Build a payload on a producer so we get a fully-formed block for block 1.

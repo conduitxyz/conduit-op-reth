@@ -497,7 +497,10 @@ mod tests {
     /// with a conduit section injected, exactly as `build_genesis_with_override` does.
     #[test]
     fn parse_saigon_genesis_with_conduit_config() {
-        const SAIGON_GENESIS: &str = include_str!("../../../tests/fixtures/saigon-genesis.json");
+        const SAIGON_GENESIS: &str = include_str!(concat!(
+            env!("CARGO_WORKSPACE_DIR"),
+            "/tests/fixtures/saigon-genesis.json"
+        ));
 
         let mut genesis: serde_json::Value = serde_json::from_str(SAIGON_GENESIS).unwrap();
         genesis["config"]["conduit"] = serde_json::json!({

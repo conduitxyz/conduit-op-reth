@@ -10,7 +10,6 @@ use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::WithEncoded;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod genesis_validation_test;
 pub mod state_override_test;
@@ -44,6 +43,8 @@ pub const STORAGE_SLOT: B256 =
 pub const STORAGE_SLOT_2: B256 =
     b256!("0000000000000000000000000000000000000000000000000000000000000002");
 pub const PREFUND_BALANCE: &str = "0xde0b6b3a7640000"; // 1 ETH
+pub const PREFUND_BALANCE_U256: alloy_primitives::U256 =
+    alloy_primitives::U256::from_limbs([0xde0b6b3a7640000, 0, 0, 0]);
 
 /// Initial timestamp used by reth's `PayloadTestContext` (hardcoded).
 /// Each `advance_block()` increments by 1.
@@ -55,7 +56,10 @@ const INITIAL_PAYLOAD_TIMESTAMP: u64 = 1710338135;
 /// - Block 3: t=INITIAL+3 -> fork active AND active at t-2 -> no-op
 pub const FORK_ACTIVATION_TIMESTAMP: u64 = INITIAL_PAYLOAD_TIMESTAMP + 2;
 
-const BASE_GENESIS: &str = include_str!("../../../../tests/fixtures/saigon-genesis.json");
+pub(crate) const BASE_GENESIS: &str = include_str!(concat!(
+    env!("CARGO_WORKSPACE_DIR"),
+    "/tests/fixtures/saigon-genesis.json"
+));
 
 /// Create OP payload attributes including the required L1 block info deposit tx.
 pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
@@ -124,23 +128,10 @@ pub fn build_genesis_with_override(
 
 /// Parse a genesis JSON string into an `Arc<ConduitOpChainSpec>` via a temp file.
 pub fn parse_chain_spec(genesis_json: &str) -> Arc<ConduitOpChainSpec> {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "conduit-op-e2e-{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-        id,
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("genesis.json");
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("genesis.json");
     std::fs::write(&path, genesis_json).unwrap();
-    let spec =
-        ConduitOpChainSpecParser::parse(path.to_str().unwrap()).expect("failed to parse genesis");
-    std::fs::remove_dir_all(&dir).ok();
-    spec
+    ConduitOpChainSpecParser::parse(path.to_str().unwrap()).expect("failed to parse genesis")
 }
 
 /// Build a `NodeConfig` tuned for deterministic e2e tests.
