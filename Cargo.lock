@@ -2084,7 +2084,6 @@ dependencies = [
  "alloy-op-evm",
  "alloy-primitives",
  "alloy-rpc-types-eth",
- "clap",
  "eyre",
  "op-alloy-consensus",
  "op-alloy-rpc-types-engine",

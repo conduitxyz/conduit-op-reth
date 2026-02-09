@@ -30,10 +30,8 @@ const INITIAL_PAYLOAD_TIMESTAMP: u64 = 1710338135;
 /// - Block 3: t=INITIAL+3 -> fork active AND active at t-2 -> no-op
 pub const FORK_ACTIVATION_TIMESTAMP: u64 = INITIAL_PAYLOAD_TIMESTAMP + 2;
 
-pub(crate) const BASE_GENESIS: &str = include_str!(concat!(
-    env!("CARGO_WORKSPACE_DIR"),
-    "/tests/fixtures/saigon-genesis.json"
-));
+pub(crate) const BASE_GENESIS: &str =
+    include_str!(concat!(env!("CARGO_WORKSPACE_DIR"), "/tests/fixtures/saigon-genesis.json"));
 
 /// Create OP payload attributes including the required L1 block info deposit tx.
 pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
@@ -75,10 +73,7 @@ pub fn build_genesis_with_override(
     // Jovian extra data: 17 bytes (version=1, zeros for eip1559 params/min base fee).
     let obj = genesis.as_object_mut().unwrap();
     obj.remove("extradata");
-    obj.insert(
-        "extraData".to_string(),
-        serde_json::json!("0x0100000000000000000000000000000000"),
-    );
+    obj.insert("extraData".to_string(), serde_json::json!("0x0100000000000000000000000000000000"));
 
     genesis["config"]["conduit"] = serde_json::json!({
         "stateOverrideFork0": {
@@ -88,9 +83,7 @@ pub fn build_genesis_with_override(
     });
 
     if let Some(serde_json::Value::Object(map)) = extra_alloc {
-        let alloc_obj = genesis["alloc"]
-            .as_object_mut()
-            .expect("alloc should be object");
+        let alloc_obj = genesis["alloc"].as_object_mut().expect("alloc should be object");
         for (k, v) in map {
             alloc_obj.insert(k, v);
         }
@@ -136,10 +129,7 @@ macro_rules! launch_test_node {
 
         let tasks = TaskManager::current();
         let node_config = crate::e2e::test_node_config($chain_spec);
-        let NodeHandle {
-            node,
-            node_exit_future: _,
-        } = NodeBuilder::new(node_config)
+        let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
             .testing_node(tasks.executor())
             .node(conduit_op_reth_node::node::ConduitOpNode::default())
             .launch()
@@ -159,8 +149,7 @@ pub(crate) use launch_test_node;
 macro_rules! advance {
     ($ctx:expr) => {{
         let payload = $ctx.advance_block().await?;
-        $ctx.wait_block(payload.block().number, payload.block().hash(), false)
-            .await?;
+        $ctx.wait_block(payload.block().number, payload.block().hash(), false).await?;
         payload
     }};
 }

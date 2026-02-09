@@ -4,7 +4,8 @@ use conduit_op_reth_node::node::ConduitOpNode;
 use reth_node_api::PayloadTypes;
 use reth_node_builder::NodeTypes;
 
-/// Ensures the saigon genesis fixture (with lowercase `extradata`) is rejected by `engine_newPayload`.
+/// Ensures the saigon genesis fixture (with lowercase `extradata`) is rejected by
+/// `engine_newPayload`.
 #[tokio::test]
 async fn test_saigon_genesis_invalid_for_new_payload() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

@@ -3,7 +3,7 @@ name = "conduit-op-reth-node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+publish.workspace = true
 
 [dependencies]
 reth-optimism-chainspec = { workspace = true, features = ["superchain-configs"] }
@@ -35,7 +35,6 @@ op-alloy-rpc-types-engine.workspace = true
 revm.workspace = true
 op-revm.workspace = true
 
-clap.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true

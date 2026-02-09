@@ -1,5 +1,4 @@
-use crate::chainspec::ConduitOpChainSpec;
-use crate::evm::ConduitOpExecutorBuilder;
+use crate::{chainspec::ConduitOpChainSpec, evm::ConduitOpExecutorBuilder};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_node_api::{FullNodeComponents, PayloadAttributesBuilder, PayloadTypes};
 use reth_node_builder::{
@@ -94,12 +93,8 @@ where
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        let RollupArgs {
-            disable_txpool_gossip,
-            compute_pending_block,
-            discovery_v4,
-            ..
-        } = self.args;
+        let RollupArgs { disable_txpool_gossip, compute_pending_block, discovery_v4, .. } =
+            self.args;
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(

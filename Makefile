@@ -1,7 +1,7 @@
-.PHONY: lint fmt clippy test pr pr-fix
+.PHONY: lint fmt clippy deny udeps docs test pr pr-fix
 
 ## Run all checks that CI runs on pull requests
-pr: fmt clippy test
+pr: fmt clippy deny udeps docs test
 	@echo "All PR checks passed!"
 
 ## Auto-fix formatting issues
@@ -16,6 +16,18 @@ fmt:
 clippy:
 	@echo "Running clippy..."
 	cargo clippy --workspace --all-targets -- -D warnings
+
+deny:
+	@echo "Running security audit..."
+	cargo deny check
+
+udeps:
+	@echo "Checking unused dependencies..."
+	cargo machete
+
+docs:
+	@echo "Checking documentation..."
+	RUSTDOCFLAGS="-D warnings" cargo doc --all --no-deps --document-private-items
 
 test:
 	@echo "Running tests..."

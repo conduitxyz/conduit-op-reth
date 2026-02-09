@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-license = "TBD"
+publish = false
 
 [workspace.dependencies]
 # Internal

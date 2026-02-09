@@ -1,9 +1,11 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
 use clap::Parser;
-use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
-use conduit_op_reth_node::evm::ConduitOpEvmConfig;
-use conduit_op_reth_node::node::ConduitOpNode;
+use conduit_op_reth_node::{
+    chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser},
+    evm::ConduitOpEvmConfig,
+    node::ConduitOpNode,
+};
 use reth_db::DatabaseEnv;
 use reth_ethereum_cli::Cli;
 use reth_node_builder::{NodeBuilder, WithLaunchContext};
@@ -27,10 +29,7 @@ fn main() {
     if let Err(err) = Cli::<ConduitOpChainSpecParser, RollupArgs>::parse()
         .run_with_components::<ConduitOpNode>(
             |spec: Arc<ConduitOpChainSpec>| {
-                (
-                    ConduitOpEvmConfig::new(spec.clone()),
-                    Arc::new(OpBeaconConsensus::new(spec)),
-                )
+                (ConduitOpEvmConfig::new(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
             },
             |builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ConduitOpChainSpec>>,
              rollup_args| async move {
