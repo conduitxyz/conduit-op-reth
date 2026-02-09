@@ -1,7 +1,7 @@
 use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks};
 use alloy_consensus::Header;
-use alloy_genesis::{Genesis, GenesisAccount};
-use alloy_primitives::Address;
+use alloy_genesis::Genesis;
+use alloy_primitives::{Address, B256, Bytes};
 use reth_chainspec::{
     Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
     ForkFilter, ForkId, Hardfork, Hardforks, Head,
@@ -13,15 +13,27 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Configuration for the StateOverrideFork0 hardfork.
+/// Account state to apply during a state override hardfork.
 ///
-/// State updates use [`GenesisAccount`] from alloy-genesis, matching the standard `alloc`
-/// representation. Each entry can set `code` (bytecode) and/or `storage` slots. Fields like
-/// `balance` and `nonce` are available but typically unused for hardfork state transitions.
+/// Only `code` and `storage` are supported — these are the fields relevant for
+/// hardfork state transitions. Unlike `alloy_genesis::GenesisAccount`, all fields
+/// are optional and there are no strict serde requirements.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateOverrideAccount {
+    /// Bytecode to deploy at this address.
+    #[serde(default)]
+    pub code: Option<Bytes>,
+    /// Storage slots to set at this address.
+    #[serde(default)]
+    pub storage: Option<std::collections::BTreeMap<B256, B256>>,
+}
+
+/// Configuration for the StateOverrideFork0 hardfork.
 #[derive(Debug, Clone)]
 pub struct StateOverrideFork0Config {
     /// Account state updates to apply at activation, keyed by address.
-    pub updates: HashMap<Address, GenesisAccount>,
+    pub updates: HashMap<Address, StateOverrideAccount>,
 }
 
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
@@ -161,7 +173,7 @@ struct ConduitOpGenesisConfig {
 #[derive(Debug, Deserialize)]
 struct StateOverrideFork0Raw {
     time: u64,
-    updates: HashMap<Address, GenesisAccount>,
+    updates: HashMap<Address, StateOverrideAccount>,
 }
 
 /// ConduitOp chain specification parser.
@@ -194,7 +206,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             .config
             .extra_fields
             .deserialize_as()
-            .unwrap_or_default();
+            .map_err(|e| eyre::eyre!("failed to deserialize conduit config: {e}"))?;
 
         let raw_fork0 = extras.conduit.and_then(|c| c.state_override_fork0);
 
@@ -275,7 +287,6 @@ mod tests {
                 "time": time,
                 "updates": {
                     "0x4200000000000000000000000000000000000042": {
-                        "balance": "0x0",
                         "code": "0x00"
                     }
                 }
@@ -309,11 +320,9 @@ mod tests {
                 "time": 1234567890,
                 "updates": {
                     "0x4200000000000000000000000000000000000042": {
-                        "balance": "0x0",
                         "code": "0x6080604052"
                     },
                     "0x4200000000000000000000000000000000000099": {
-                        "balance": "0x0",
                         "storage": {
                             "0x0000000000000000000000000000000000000000000000000000000000000001":
                                 "0x00000000000000000000000000000000000000000000000000000000000000ff"
@@ -482,5 +491,39 @@ mod tests {
             spec.fork_filter(head_at(5000)).current(),
             spec.fork_id(&head_at(5000))
         );
+    }
+
+    /// Regression test: parse the saigon genesis fixture (used by e2e tests)
+    /// with a conduit section injected, exactly as `build_genesis_with_override` does.
+    #[test]
+    fn parse_saigon_genesis_with_conduit_config() {
+        const SAIGON_GENESIS: &str = include_str!(concat!(
+            env!("CARGO_WORKSPACE_DIR"),
+            "/tests/fixtures/saigon-genesis.json"
+        ));
+
+        let mut genesis: serde_json::Value = serde_json::from_str(SAIGON_GENESIS).unwrap();
+        genesis["config"]["conduit"] = serde_json::json!({
+            "stateOverrideFork0": {
+                "time": 1710338137,
+                "updates": {
+                    "0x4200000000000000000000000000000000000099": {
+                        "storage": {
+                            "0x0000000000000000000000000000000000000000000000000000000000000001":
+                                "0x00000000000000000000000000000000000000000000000000000000000000ff"
+                        }
+                    }
+                }
+            }
+        });
+        let json = serde_json::to_string(&genesis).unwrap();
+        let spec = parse_spec(&json);
+
+        assert!(
+            spec.state_override_fork0.is_some(),
+            "state_override_fork0 should be Some when conduit section is present in saigon genesis"
+        );
+        let config = spec.state_override_fork0.as_ref().unwrap();
+        assert_eq!(config.updates.len(), 1);
     }
 }

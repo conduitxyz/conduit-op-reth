@@ -15,9 +15,13 @@ use revm::state::EvmStorageSlot;
 
 /// Applies state updates configured for [`StateOverrideFork0`] at the transition block.
 ///
-/// Each update entry uses [`GenesisAccount`](alloy_genesis::GenesisAccount) from alloy-genesis,
-/// and can optionally set `code` (bytecode) and/or `storage` slots on a target address.
+/// Each update entry can set `code` (bytecode) and/or `storage` slots on a target address.
 /// Existing account balance and nonce are preserved.
+///
+/// **Important**: Storage overrides on an address that has no code (and no balance/nonce) will
+/// be silently discarded by EIP-161 state clear when committed to `State<DB>`. Always pair
+/// storage overrides with a `code` field, or target an address that already has a non-empty
+/// account (balance, nonce, or code).
 ///
 /// Uses the OP Stack 2-second block time heuristic (matching Canyon's `ensure_create2_deployer`)
 /// to detect the transition block without requiring the parent block's timestamp.
@@ -71,8 +75,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chainspec::StateOverrideAccount;
     use crate::hardforks::ConduitOpHardfork;
-    use alloy_genesis::GenesisAccount;
     use alloy_primitives::{Address, B256, Bytes};
     use reth_chainspec::{EthereumHardfork, EthereumHardforks, ForkCondition};
     use reth_optimism_forks::{OpHardfork, OpHardforks};
@@ -112,24 +116,23 @@ mod tests {
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x42),
-            GenesisAccount {
+            StateOverrideAccount {
                 code: Some(Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52])),
-                ..Default::default()
+                storage: None,
             },
         );
         StateOverrideFork0Config { updates }
     }
 
-    fn storage_config() -> StateOverrideFork0Config {
+    fn storage_only_config() -> StateOverrideFork0Config {
         let mut storage = BTreeMap::new();
         storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xff));
-        storage.insert(B256::with_last_byte(0x02), B256::with_last_byte(0x42));
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x99),
-            GenesisAccount {
+            StateOverrideAccount {
+                code: None,
                 storage: Some(storage),
-                ..Default::default()
             },
         );
         StateOverrideFork0Config { updates }
@@ -141,36 +144,15 @@ mod tests {
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x42),
-            GenesisAccount {
+            StateOverrideAccount {
                 code: Some(Bytes::from_static(&[0x60, 0x80])),
                 storage: Some(storage),
-                ..Default::default()
             },
         );
         StateOverrideFork0Config { updates }
     }
 
-    fn multi_config() -> StateOverrideFork0Config {
-        let mut updates = HashMap::default();
-        updates.insert(
-            Address::with_last_byte(0x42),
-            GenesisAccount {
-                code: Some(Bytes::from_static(&[0x60, 0x80])),
-                ..Default::default()
-            },
-        );
-        let mut storage = BTreeMap::new();
-        storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xff));
-        updates.insert(
-            Address::with_last_byte(0x99),
-            GenesisAccount {
-                storage: Some(storage),
-                ..Default::default()
-            },
-        );
-        StateOverrideFork0Config { updates }
-    }
-
+    /// Core happy-path: bytecode injected at exact transition timestamp.
     #[test]
     fn injects_bytecode_at_transition_block() {
         let spec = MockSpec {
@@ -188,23 +170,7 @@ mod tests {
         assert_eq!(info.code.unwrap().original_bytes(), *bytecode);
     }
 
-    #[test]
-    fn sets_storage_at_transition_block() {
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
-        let config = storage_config();
-        let mut db = InMemoryDB::default();
-
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
-
-        let addr = Address::with_last_byte(0x99);
-        let slot1 = db.storage_ref(addr, U256::from(0x01)).unwrap();
-        assert_eq!(slot1, U256::from(0xff));
-        let slot2 = db.storage_ref(addr, U256::from(0x02)).unwrap();
-        assert_eq!(slot2, U256::from(0x42));
-    }
-
+    /// Mixed config: both code and storage slots applied in a single override entry.
     #[test]
     fn applies_bytecode_and_storage_together() {
         let spec = MockSpec {
@@ -224,30 +190,7 @@ mod tests {
         assert_eq!(slot, U256::from(0xaa));
     }
 
-    #[test]
-    fn applies_multiple_updates() {
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
-        let config = multi_config();
-        let mut db = InMemoryDB::default();
-
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
-
-        // Bytecode on 0x42.
-        let info = db
-            .basic_ref(Address::with_last_byte(0x42))
-            .unwrap()
-            .expect("account should exist");
-        assert!(info.code.is_some());
-
-        // Storage on 0x99.
-        let slot = db
-            .storage_ref(Address::with_last_byte(0x99), U256::from(0x01))
-            .unwrap();
-        assert_eq!(slot, U256::from(0xff));
-    }
-
+    /// Timestamp before fork activation → no state changes.
     #[test]
     fn no_op_before_activation() {
         let spec = MockSpec {
@@ -262,6 +205,9 @@ mod tests {
         assert!(info.is_none(), "should not apply before fork activates");
     }
 
+    /// Timestamp past the transition window → complete no-op (no account created).
+    /// Differs from `does_not_reapply_after_transition` which verifies existing state
+    /// isn't clobbered; this test verifies no state is touched at all.
     #[test]
     fn no_op_after_transition() {
         let spec = MockSpec {
@@ -303,6 +249,107 @@ mod tests {
         assert_eq!(info.nonce, 5);
     }
 
+    /// Storage overrides on an empty account (no code, balance, or nonce) are silently
+    /// discarded by EIP-161 state clear when committed to `State<DB>`. Always pair
+    /// storage overrides with code.
+    #[test]
+    fn storage_only_on_empty_account_is_discarded_by_eip161() {
+        use revm::Database as _;
+        use revm::database::State;
+
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
+        let config = storage_only_config();
+        let inner = InMemoryDB::default();
+        let mut db = State::builder()
+            .with_database(inner)
+            .with_bundle_update()
+            .build();
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+
+        db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
+
+        let addr = Address::with_last_byte(0x99);
+        let slot = db.storage(addr, U256::from(0x01)).unwrap();
+        assert_eq!(
+            slot,
+            U256::ZERO,
+            "storage-only override on empty account should be discarded by EIP-161 state clear"
+        );
+    }
+
+    #[test]
+    fn storage_only_on_non_empty_account_persists() {
+        use revm::Database as _;
+        use revm::database::State;
+
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
+        let config = storage_only_config();
+        let mut inner = InMemoryDB::default();
+        inner.insert_account_info(
+            Address::with_last_byte(0x99),
+            AccountInfo {
+                balance: alloy_primitives::U256::from(1),
+                ..Default::default()
+            },
+        );
+        let mut db = State::builder()
+            .with_database(inner)
+            .with_bundle_update()
+            .build();
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+
+        db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
+
+        let addr = Address::with_last_byte(0x99);
+        let slot = db.storage(addr, U256::from(0x01)).unwrap();
+        assert_eq!(
+            slot,
+            U256::from(0xff),
+            "storage-only override should persist on non-empty account"
+        );
+    }
+
+    /// Override applied at transition, then code changed externally — a later block
+    /// must not revert it. Differs from `no_op_after_transition` which verifies the
+    /// guard on a clean DB; this verifies post-transition state isn't clobbered.
+    #[test]
+    fn does_not_reapply_after_transition() {
+        let spec = MockSpec {
+            fork_time: Some(1000),
+        };
+        let config = bytecode_config();
+        let mut db = InMemoryDB::default();
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+
+        let addr = Address::with_last_byte(0x42);
+        let new_code = Bytes::from_static(&[0x01, 0x02]);
+        db.insert_account_info(
+            addr,
+            AccountInfo {
+                code_hash: alloy_primitives::keccak256(new_code.as_ref()),
+                code: Some(Bytecode::new_raw(new_code.clone())),
+                ..Default::default()
+            },
+        );
+
+        ensure_state_override_fork0(&spec, 1002, &config, &mut db).unwrap();
+
+        let info = db.basic_ref(addr).unwrap().expect("account should exist");
+        assert_eq!(
+            info.code.unwrap().original_bytes(),
+            new_code,
+            "override should not be re-applied after transition"
+        );
+    }
+
+    /// Fork time = None → no-op regardless of timestamp.
     #[test]
     fn no_op_when_fork_not_configured() {
         let spec = MockSpec { fork_time: None };
