@@ -1,4 +1,10 @@
-.PHONY: lint fmt clippy deny udeps docs test pr pr-fix
+.PHONY: build build-maxperf lint fmt clippy deny udeps docs test pr pr-fix
+
+build:
+	cargo build --release
+
+build-maxperf:
+	cargo build --profile maxperf
 
 ## Run all checks that CI runs on pull requests
 pr: fmt clippy deny udeps docs test

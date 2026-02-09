@@ -17,12 +17,12 @@ Fully compatible with existing OP Stack networks, serving as a drop-in replaceme
 - Rust 1.92+
 - Git
 
-### Build
+### Production Build
 
 ```bash
 git clone https://github.com/conduit-xyz/conduit-op-reth.git
 cd conduit-op-reth
-cargo build --release
+cargo build --profile maxperf
 ```
 
 ## License
