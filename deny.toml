@@ -13,6 +13,7 @@ feature-depth = 1
 [advisories]
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "paste crate is unmaintained but widely used, no safe upgrade available" },
+  { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained but used transitively by reth, no safe upgrade available" },
 ]
 
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
@@ -35,8 +36,9 @@ allow = [
 confidence-threshold = 0.8
 exceptions = []
 
+# TODO: remove once this project has a license — also remove `publish = false` from workspace and crate Cargo.tomls
 [licenses.private]
-ignore = false
+ignore = true
 registries = []
 
 # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html

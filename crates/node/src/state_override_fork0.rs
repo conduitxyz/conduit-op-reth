@@ -2,14 +2,14 @@
 //!
 //! Applies account state overrides (bytecode and/or storage) at the fork activation
 //! block, following the same pattern as the Canyon create2 deployer injection in
-//! [`alloy_op_evm::block::canyon`].
+//! `alloy_op_evm::block::canyon`.
 
 use crate::{chainspec::StateOverrideFork0Config, hardforks::ConduitOpHardforks};
 use alloy_evm::Database;
 use alloy_primitives::U256;
 use revm::{DatabaseCommit, bytecode::Bytecode, primitives::HashMap, state::EvmStorageSlot};
 
-/// Applies state updates configured for [`StateOverrideFork0`] at the transition block.
+/// Applies state updates configured for `StateOverrideFork0` at the transition block.
 ///
 /// Each update entry can set `code` (bytecode) and/or `storage` slots on a target address.
 /// Existing account balance and nonce are preserved.
