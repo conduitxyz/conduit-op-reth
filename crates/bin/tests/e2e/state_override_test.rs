@@ -83,10 +83,7 @@ async fn test_state_override_applied_at_activation() -> eyre::Result<()> {
     assert_eq!(state.storage(addr_a, STORAGE_SLOT_1)?, None);
     assert!(state.account_code(&addr_b)?.is_none());
     assert_eq!(
-        state
-            .basic_account(&addr_b)?
-            .expect("addr_b from genesis alloc")
-            .balance,
+        state.basic_account(&addr_b)?.expect("addr_b from genesis alloc").balance,
         PREFUND_BALANCE_U256
     );
 
@@ -97,18 +94,12 @@ async fn test_state_override_applied_at_activation() -> eyre::Result<()> {
         state.account_code(&addr_a)?.unwrap().original_bytes(),
         Bytes::from_static(TARGET_BYTECODE)
     );
-    assert_eq!(
-        state.storage(addr_a, STORAGE_SLOT_1)?,
-        Some(U256::from(0xff))
-    );
+    assert_eq!(state.storage(addr_a, STORAGE_SLOT_1)?, Some(U256::from(0xff)));
     assert_eq!(
         state.account_code(&addr_b)?.unwrap().original_bytes(),
         Bytes::from_static(&[0xfe, 0xfe])
     );
-    assert_eq!(
-        state.basic_account(&addr_b)?.unwrap().balance,
-        PREFUND_BALANCE_U256,
-    );
+    assert_eq!(state.basic_account(&addr_b)?.unwrap().balance, PREFUND_BALANCE_U256,);
 
     // Block 3: all values persist.
     advance!(ctx);
@@ -117,18 +108,12 @@ async fn test_state_override_applied_at_activation() -> eyre::Result<()> {
         state.account_code(&addr_a)?.unwrap().original_bytes(),
         Bytes::from_static(TARGET_BYTECODE)
     );
-    assert_eq!(
-        state.storage(addr_a, STORAGE_SLOT_1)?,
-        Some(U256::from(0xff))
-    );
+    assert_eq!(state.storage(addr_a, STORAGE_SLOT_1)?, Some(U256::from(0xff)));
     assert_eq!(
         state.account_code(&addr_b)?.unwrap().original_bytes(),
         Bytes::from_static(&[0xfe, 0xfe])
     );
-    assert_eq!(
-        state.basic_account(&addr_b)?.unwrap().balance,
-        PREFUND_BALANCE_U256,
-    );
+    assert_eq!(state.basic_account(&addr_b)?.unwrap().balance, PREFUND_BALANCE_U256,);
 
     Ok(())
 }
@@ -140,16 +125,13 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     reth_tracing::init_test_tracing();
 
     let deployer_key: PrivateKeySigner =
-        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-            .parse()
-            .unwrap();
+        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse().unwrap();
     let deployer_addr = deployer_key.address();
     let contract_addr = deployer_addr.create(0);
 
     // Init code: deploys runtime bytecode 0xfefe.
-    let init_code = Bytes::from_static(&[
-        0x61, 0xfe, 0xfe, 0x60, 0x00, 0x52, 0x60, 0x02, 0x60, 0x1e, 0xf3,
-    ]);
+    let init_code =
+        Bytes::from_static(&[0x61, 0xfe, 0xfe, 0x60, 0x00, 0x52, 0x60, 0x02, 0x60, 0x1e, 0xf3]);
 
     let contract_hex = format!("{contract_addr}");
     let deployer_hex = format!("{deployer_addr}");
@@ -167,10 +149,7 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
         }),
     );
     let mut alloc = serde_json::Map::new();
-    alloc.insert(
-        deployer_hex,
-        serde_json::json!({ "balance": PREFUND_BALANCE }),
-    );
+    alloc.insert(deployer_hex, serde_json::json!({ "balance": PREFUND_BALANCE }));
 
     let genesis_json = build_genesis_with_override(
         FORK_ACTIVATION_TIMESTAMP,
@@ -187,14 +166,7 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     // Wait for the tx to appear in the pool before building a block.
     let start = std::time::Instant::now();
     loop {
-        if ctx
-            .rpc
-            .inner
-            .eth_api()
-            .transaction_by_hash(tx_hash)
-            .await?
-            .is_some()
-        {
+        if ctx.rpc.inner.eth_api().transaction_by_hash(tx_hash).await?.is_some() {
             break;
         }
         if start.elapsed() > std::time::Duration::from_secs(2) {
@@ -204,50 +176,28 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     }
 
     let payload = advance!(ctx);
-    let included = payload
-        .block()
-        .body()
-        .transactions()
-        .any(|tx| *tx.tx_hash() == tx_hash);
+    let included = payload.block().body().transactions().any(|tx| *tx.tx_hash() == tx_hash);
     assert!(included, "deploy tx should be included in block");
 
     let state = ctx.inner.provider.latest()?;
-    let code = state
-        .account_code(&contract_addr)?
-        .expect("contract should be deployed");
+    let code = state.account_code(&contract_addr)?.expect("contract should be deployed");
     assert_eq!(code.original_bytes(), Bytes::from_static(&[0xfe, 0xfe]));
 
     // Block 2: fork activates — code and storage overridden.
     advance!(ctx);
     let state = ctx.inner.provider.latest()?;
-    let code = state
-        .account_code(&contract_addr)?
-        .expect("should have code after override");
+    let code = state.account_code(&contract_addr)?.expect("should have code after override");
     assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
-    assert_eq!(
-        state.storage(contract_addr, STORAGE_SLOT_1)?,
-        Some(U256::from(0xff))
-    );
-    assert_eq!(
-        state.storage(contract_addr, STORAGE_SLOT_2)?,
-        Some(U256::from(0x42))
-    );
+    assert_eq!(state.storage(contract_addr, STORAGE_SLOT_1)?, Some(U256::from(0xff)));
+    assert_eq!(state.storage(contract_addr, STORAGE_SLOT_2)?, Some(U256::from(0x42)));
 
     // Block 3: values persist.
     advance!(ctx);
     let state = ctx.inner.provider.latest()?;
-    let code = state
-        .account_code(&contract_addr)?
-        .expect("code should persist");
+    let code = state.account_code(&contract_addr)?.expect("code should persist");
     assert_eq!(code.original_bytes(), Bytes::from_static(TARGET_BYTECODE));
-    assert_eq!(
-        state.storage(contract_addr, STORAGE_SLOT_1)?,
-        Some(U256::from(0xff))
-    );
-    assert_eq!(
-        state.storage(contract_addr, STORAGE_SLOT_2)?,
-        Some(U256::from(0x42))
-    );
+    assert_eq!(state.storage(contract_addr, STORAGE_SLOT_1)?, Some(U256::from(0xff)));
+    assert_eq!(state.storage(contract_addr, STORAGE_SLOT_2)?, Some(U256::from(0x42)));
 
     Ok(())
 }
@@ -305,13 +255,9 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
 
     // Block 3: still V2.
     advance!(ctx);
-    let result = EthCall::call(
-        ctx.rpc.inner.eth_api(),
-        call_request.into(),
-        None,
-        EvmOverrides::default(),
-    )
-    .await?;
+    let result =
+        EthCall::call(ctx.rpc.inner.eth_api(), call_request.into(), None, EvmOverrides::default())
+            .await?;
     let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(ret, U256::from(99));
 

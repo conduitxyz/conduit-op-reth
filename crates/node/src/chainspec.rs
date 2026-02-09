@@ -10,8 +10,7 @@ use reth_cli::chainspec::{ChainSpecParser, parse_genesis};
 use reth_optimism_chainspec::{OpChainSpec, SUPPORTED_CHAINS, generated_chain_value_parser};
 use reth_optimism_forks::{OpHardfork, OpHardforks};
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// Account state to apply during a state override hardfork.
 ///
@@ -216,19 +215,14 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
         // Register custom hardfork in the inner hardfork list so it appears in
         // fork IDs, fork filters, and forks_iter().
         let state_override_fork0 = raw_fork0.map(|raw| {
-            op_chain_spec.inner.hardforks.insert(
-                ConduitOpHardfork::StateOverrideFork0,
-                ForkCondition::Timestamp(raw.time),
-            );
-            StateOverrideFork0Config {
-                updates: raw.updates,
-            }
+            op_chain_spec
+                .inner
+                .hardforks
+                .insert(ConduitOpHardfork::StateOverrideFork0, ForkCondition::Timestamp(raw.time));
+            StateOverrideFork0Config { updates: raw.updates }
         });
 
-        Ok(Arc::new(ConduitOpChainSpec {
-            inner: op_chain_spec,
-            state_override_fork0,
-        }))
+        Ok(Arc::new(ConduitOpChainSpec { inner: op_chain_spec, state_override_fork0 }))
     }
 }
 
@@ -296,11 +290,7 @@ mod tests {
     }
 
     fn head_at(timestamp: u64) -> Head {
-        Head {
-            number: 0,
-            timestamp,
-            ..Default::default()
-        }
+        Head { number: 0, timestamp, ..Default::default() }
     }
 
     #[test]
@@ -333,44 +323,27 @@ mod tests {
         });
         let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
 
-        let config = spec
-            .state_override_fork0
-            .as_ref()
-            .expect("should have conduit config");
+        let config = spec.state_override_fork0.as_ref().expect("should have conduit config");
         assert_eq!(config.updates.len(), 2);
 
         assert_eq!(
             spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
             ForkCondition::Timestamp(1234567890),
         );
-        assert!(
-            spec.op_fork_activation(OpHardfork::Bedrock)
-                .active_at_block(0)
-        );
+        assert!(spec.op_fork_activation(OpHardfork::Bedrock).active_at_block(0));
 
-        let addr0: Address = "0x4200000000000000000000000000000000000042"
-            .parse()
-            .unwrap();
+        let addr0: Address = "0x4200000000000000000000000000000000000042".parse().unwrap();
         assert_eq!(
             config.updates[&addr0].code.as_ref().unwrap(),
             &alloy_primitives::Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52]),
         );
 
-        let addr1: Address = "0x4200000000000000000000000000000000000099"
-            .parse()
-            .unwrap();
-        let storage = config.updates[&addr1]
-            .storage
-            .as_ref()
-            .expect("should have storage");
+        let addr1: Address = "0x4200000000000000000000000000000000000099".parse().unwrap();
+        let storage = config.updates[&addr1].storage.as_ref().expect("should have storage");
         let slot_key: alloy_primitives::B256 =
-            "0x0000000000000000000000000000000000000000000000000000000000000001"
-                .parse()
-                .unwrap();
+            "0x0000000000000000000000000000000000000000000000000000000000000001".parse().unwrap();
         let slot_val: alloy_primitives::B256 =
-            "0x00000000000000000000000000000000000000000000000000000000000000ff"
-                .parse()
-                .unwrap();
+            "0x00000000000000000000000000000000000000000000000000000000000000ff".parse().unwrap();
         assert_eq!(storage[&slot_key], slot_val);
     }
 
@@ -417,20 +390,8 @@ mod tests {
 
         // All OP forks at genesis → single stable hash, no next fork.
         let base_hash = ForkHash([0x8b, 0x51, 0xa7, 0xf5]);
-        assert_eq!(
-            conduit_spec.fork_id(&head_at(0)),
-            ForkId {
-                hash: base_hash,
-                next: 0
-            }
-        );
-        assert_eq!(
-            conduit_spec.latest_fork_id(),
-            ForkId {
-                hash: base_hash,
-                next: 0
-            }
-        );
+        assert_eq!(conduit_spec.fork_id(&head_at(0)), ForkId { hash: base_hash, next: 0 });
+        assert_eq!(conduit_spec.latest_fork_id(), ForkId { hash: base_hash, next: 0 });
     }
 
     #[test]
@@ -443,54 +404,18 @@ mod tests {
         let post_fork_hash = ForkHash([0xd3, 0xcd, 0x38, 0xf6]);
 
         // Before activation: same base hash, next points to custom fork.
-        assert_eq!(
-            spec.fork_id(&head_at(0)),
-            ForkId {
-                hash: base_hash,
-                next: 5000
-            }
-        );
-        assert_eq!(
-            spec.fork_id(&head_at(4999)),
-            ForkId {
-                hash: base_hash,
-                next: 5000
-            }
-        );
+        assert_eq!(spec.fork_id(&head_at(0)), ForkId { hash: base_hash, next: 5000 });
+        assert_eq!(spec.fork_id(&head_at(4999)), ForkId { hash: base_hash, next: 5000 });
 
         // At activation: hash changes, no further forks.
-        assert_eq!(
-            spec.fork_id(&head_at(5000)),
-            ForkId {
-                hash: post_fork_hash,
-                next: 0
-            }
-        );
-        assert_eq!(
-            spec.fork_id(&head_at(10000)),
-            ForkId {
-                hash: post_fork_hash,
-                next: 0
-            }
-        );
+        assert_eq!(spec.fork_id(&head_at(5000)), ForkId { hash: post_fork_hash, next: 0 });
+        assert_eq!(spec.fork_id(&head_at(10000)), ForkId { hash: post_fork_hash, next: 0 });
 
-        assert_eq!(
-            spec.latest_fork_id(),
-            ForkId {
-                hash: post_fork_hash,
-                next: 0
-            }
-        );
+        assert_eq!(spec.latest_fork_id(), ForkId { hash: post_fork_hash, next: 0 });
 
         // fork_filter.current() must agree with fork_id() at each stage.
-        assert_eq!(
-            spec.fork_filter(head_at(0)).current(),
-            spec.fork_id(&head_at(0))
-        );
-        assert_eq!(
-            spec.fork_filter(head_at(5000)).current(),
-            spec.fork_id(&head_at(5000))
-        );
+        assert_eq!(spec.fork_filter(head_at(0)).current(), spec.fork_id(&head_at(0)));
+        assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
     }
 
     /// Regression test: parse the saigon genesis fixture (used by e2e tests)

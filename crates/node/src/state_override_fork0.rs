@@ -4,14 +4,10 @@
 //! block, following the same pattern as the Canyon create2 deployer injection in
 //! [`alloy_op_evm::block::canyon`].
 
-use crate::chainspec::StateOverrideFork0Config;
-use crate::hardforks::ConduitOpHardforks;
+use crate::{chainspec::StateOverrideFork0Config, hardforks::ConduitOpHardforks};
 use alloy_evm::Database;
 use alloy_primitives::U256;
-use revm::DatabaseCommit;
-use revm::bytecode::Bytecode;
-use revm::primitives::HashMap;
-use revm::state::EvmStorageSlot;
+use revm::{DatabaseCommit, bytecode::Bytecode, primitives::HashMap, state::EvmStorageSlot};
 
 /// Applies state updates configured for [`StateOverrideFork0`] at the transition block.
 ///
@@ -37,8 +33,8 @@ where
     // If the fork is active at the current timestamp but was not active at the previous block
     // timestamp (heuristically, OP Stack block time is 2s), then we are at the transition block.
     // TODO(rezmah): review whether 2s heuristic is appropriate for all target chains
-    if !chain_spec.is_state_override_fork0_active_at_timestamp(timestamp)
-        || chain_spec.is_state_override_fork0_active_at_timestamp(timestamp.saturating_sub(2))
+    if !chain_spec.is_state_override_fork0_active_at_timestamp(timestamp) ||
+        chain_spec.is_state_override_fork0_active_at_timestamp(timestamp.saturating_sub(2))
     {
         return Ok(());
     }
@@ -60,9 +56,7 @@ where
                 let value = U256::from_be_bytes(value.0);
                 // TODO(rezmah): review whether original_value=ZERO and transaction_id=0
                 // are correct for pre-execution storage overrides
-                revm_acc
-                    .storage
-                    .insert(key, EvmStorageSlot::new_changed(U256::ZERO, value, 0));
+                revm_acc.storage.insert(key, EvmStorageSlot::new_changed(U256::ZERO, value, 0));
             }
         }
 
@@ -75,14 +69,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chainspec::StateOverrideAccount;
-    use crate::hardforks::ConduitOpHardfork;
+    use crate::{chainspec::StateOverrideAccount, hardforks::ConduitOpHardfork};
     use alloy_primitives::{Address, B256, Bytes};
     use reth_chainspec::{EthereumHardfork, EthereumHardforks, ForkCondition};
     use reth_optimism_forks::{OpHardfork, OpHardforks};
-    use revm::database::InMemoryDB;
-    use revm::database_interface::DatabaseRef;
-    use revm::state::AccountInfo;
+    use revm::{database::InMemoryDB, database_interface::DatabaseRef, state::AccountInfo};
     use std::collections::BTreeMap;
 
     struct MockSpec {
@@ -130,10 +121,7 @@ mod tests {
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x99),
-            StateOverrideAccount {
-                code: None,
-                storage: Some(storage),
-            },
+            StateOverrideAccount { code: None, storage: Some(storage) },
         );
         StateOverrideFork0Config { updates }
     }
@@ -155,9 +143,7 @@ mod tests {
     /// Core happy-path: bytecode injected at exact transition timestamp.
     #[test]
     fn injects_bytecode_at_transition_block() {
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
+        let spec = MockSpec { fork_time: Some(1000) };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -173,9 +159,7 @@ mod tests {
     /// Mixed config: both code and storage slots applied in a single override entry.
     #[test]
     fn applies_bytecode_and_storage_together() {
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
+        let spec = MockSpec { fork_time: Some(1000) };
         let config = mixed_config();
         let mut db = InMemoryDB::default();
 
@@ -193,9 +177,7 @@ mod tests {
     /// Timestamp before fork activation → no state changes.
     #[test]
     fn no_op_before_activation() {
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
+        let spec = MockSpec { fork_time: Some(1000) };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -210,9 +192,7 @@ mod tests {
     /// isn't clobbered; this test verifies no state is touched at all.
     #[test]
     fn no_op_after_transition() {
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
+        let spec = MockSpec { fork_time: Some(1000) };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -224,9 +204,7 @@ mod tests {
 
     #[test]
     fn preserves_existing_balance_and_nonce() {
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
+        let spec = MockSpec { fork_time: Some(1000) };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -241,10 +219,8 @@ mod tests {
 
         ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
 
-        let info = db
-            .basic_ref(Address::with_last_byte(0x42))
-            .unwrap()
-            .expect("account should exist");
+        let info =
+            db.basic_ref(Address::with_last_byte(0x42)).unwrap().expect("account should exist");
         assert_eq!(info.balance, alloy_primitives::U256::from(100));
         assert_eq!(info.nonce, 5);
     }
@@ -254,18 +230,12 @@ mod tests {
     /// storage overrides with code.
     #[test]
     fn storage_only_on_empty_account_is_discarded_by_eip161() {
-        use revm::Database as _;
-        use revm::database::State;
+        use revm::{Database as _, database::State};
 
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
+        let spec = MockSpec { fork_time: Some(1000) };
         let config = storage_only_config();
         let inner = InMemoryDB::default();
-        let mut db = State::builder()
-            .with_database(inner)
-            .with_bundle_update()
-            .build();
+        let mut db = State::builder().with_database(inner).with_bundle_update().build();
 
         ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
 
@@ -282,25 +252,16 @@ mod tests {
 
     #[test]
     fn storage_only_on_non_empty_account_persists() {
-        use revm::Database as _;
-        use revm::database::State;
+        use revm::{Database as _, database::State};
 
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
+        let spec = MockSpec { fork_time: Some(1000) };
         let config = storage_only_config();
         let mut inner = InMemoryDB::default();
         inner.insert_account_info(
             Address::with_last_byte(0x99),
-            AccountInfo {
-                balance: alloy_primitives::U256::from(1),
-                ..Default::default()
-            },
+            AccountInfo { balance: alloy_primitives::U256::from(1), ..Default::default() },
         );
-        let mut db = State::builder()
-            .with_database(inner)
-            .with_bundle_update()
-            .build();
+        let mut db = State::builder().with_database(inner).with_bundle_update().build();
 
         ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
 
@@ -320,9 +281,7 @@ mod tests {
     /// guard on a clean DB; this verifies post-transition state isn't clobbered.
     #[test]
     fn does_not_reapply_after_transition() {
-        let spec = MockSpec {
-            fork_time: Some(1000),
-        };
+        let spec = MockSpec { fork_time: Some(1000) };
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -359,9 +318,6 @@ mod tests {
         ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
-        assert!(
-            info.is_none(),
-            "should not apply when fork is not configured"
-        );
+        assert!(info.is_none(), "should not apply when fork is not configured");
     }
 }

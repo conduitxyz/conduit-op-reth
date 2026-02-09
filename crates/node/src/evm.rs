@@ -3,19 +3,24 @@
 //! Wraps the standard OP EVM config and block executor to apply state overrides
 //! at the `StateOverrideFork0` activation block.
 
-use crate::chainspec::ConduitOpChainSpec;
-use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks};
-use crate::state_override_fork0::ensure_state_override_fork0;
+use crate::{
+    chainspec::ConduitOpChainSpec,
+    hardforks::{ConduitOpHardfork, ConduitOpHardforks},
+    state_override_fork0::ensure_state_override_fork0,
+};
 use alloy_consensus::Header;
 use alloy_eips::Decodable2718;
-use alloy_evm::block::{
-    BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFor, ExecutableTx,
-    OnStateHook, StateDB,
+use alloy_evm::{
+    Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
+    block::{
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFor, ExecutableTx,
+        OnStateHook, StateDB,
+    },
 };
-use alloy_evm::{Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded};
-use alloy_op_evm::block::OpTxEnv;
-use alloy_op_evm::block::receipt_builder::OpReceiptBuilder;
-use alloy_op_evm::{OpBlockExecutionCtx, OpBlockExecutor, OpEvmFactory};
+use alloy_op_evm::{
+    OpBlockExecutionCtx, OpBlockExecutor, OpEvmFactory,
+    block::{OpTxEnv, receipt_builder::OpReceiptBuilder},
+};
 use alloy_primitives::Bytes;
 use op_alloy_consensus::EIP1559ParamError;
 use op_alloy_rpc_types_engine::OpExecutionData;
@@ -24,20 +29,21 @@ use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
     InspectorFor,
 };
-use reth_node_builder::components::ExecutorBuilder;
-use reth_node_builder::{BuilderContext, NodeTypes};
+use reth_node_builder::{BuilderContext, NodeTypes, components::ExecutorBuilder};
 use reth_optimism_evm::{
     OpBlockAssembler, OpBlockExecutorFactory, OpEvmConfig, OpNextBlockEnvAttributes,
     OpRethReceiptBuilder,
 };
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_primitives::OpPrimitives;
-use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader};
-use reth_primitives_traits::{SignedTransaction, TxTy, WithEncoded};
+use reth_primitives_traits::{
+    NodePrimitives, SealedBlock, SealedHeader, SignedTransaction, TxTy, WithEncoded,
+};
 use reth_storage_errors::any::AnyError;
-use revm::context::Block;
-use revm::context::result::ResultAndState;
-use revm::database::{DatabaseCommit, State};
+use revm::{
+    context::{Block, result::ResultAndState},
+    database::{DatabaseCommit, State},
+};
 use std::sync::Arc;
 use tracing::info;
 
@@ -198,10 +204,7 @@ impl ConfigureEvm for ConduitOpEvmConfig {
             self.inner.executor_factory.spec(),
             self.inner.executor_factory.receipt_builder(),
         );
-        ConduitOpBlockExecutor {
-            inner,
-            chain_spec: self.chain_spec.clone(),
-        }
+        ConduitOpBlockExecutor { inner, chain_spec: self.chain_spec.clone() }
     }
 }
 
