@@ -69,6 +69,8 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           target: ${{ inputs.target }}
+          build-args: |
+            BUILD_PROFILE=maxperf
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

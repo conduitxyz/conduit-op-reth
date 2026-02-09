@@ -2,6 +2,7 @@
 # Base container (with sccache and cargo-chef)
 #
 ARG FEATURES
+ARG BUILD_PROFILE=maxperf
 
 FROM rust:1.92 AS base
 ARG TARGETPLATFORM
@@ -51,20 +52,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM base AS builder
 WORKDIR /app
 COPY --from=planner /app/recipe.json recipe.json
+ARG BUILD_PROFILE=maxperf
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    cargo chef cook --release --recipe-path recipe.json
+    cargo chef cook --profile $BUILD_PROFILE --recipe-path recipe.json
 COPY . .
 
 FROM builder AS conduit-op-reth-build
 ARG FEATURES
+ARG BUILD_PROFILE=maxperf
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    cargo build --release --features="$FEATURES" --package=conduit-op-reth
+    cargo build --profile $BUILD_PROFILE --features="$FEATURES" --package=conduit-op-reth
 
 #
 # Runtime container
@@ -72,6 +75,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:13-slim AS conduit-op-reth-runtime
 RUN apt update && apt install -y curl jq && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=conduit-op-reth-build /app/target/release/conduit-op-reth /app/conduit-op-reth
+ARG BUILD_PROFILE=maxperf
+COPY --from=conduit-op-reth-build /app/target/$BUILD_PROFILE/conduit-op-reth /app/conduit-op-reth
 RUN ln -s /app/conduit-op-reth /usr/local/bin/op-reth
 ENTRYPOINT ["/app/conduit-op-reth"]
