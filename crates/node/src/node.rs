@@ -18,6 +18,7 @@ use reth_optimism_node::{
 use reth_optimism_payload_builder::config::OpGasLimitConfig;
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::eth::OpEthApiBuilder;
+use reth_primitives_traits::SealedHeader;
 use std::sync::Arc;
 
 /// Type configuration for the ConduitOp OP Stack node.
@@ -143,6 +144,12 @@ where
     fn local_payload_attributes_builder(
         chain_spec: &Self::ChainSpec,
     ) -> impl PayloadAttributesBuilder<<Self::Payload as PayloadTypes>::PayloadAttributes> {
-        LocalPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
+        let inner = LocalPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()));
+        // This allows us to run --dev mode. Fixed in upstream https://github.com/paradigmxyz/reth/pull/21855/changes
+        move |parent: SealedHeader| {
+            let mut attrs: op_alloy_rpc_types_engine::OpPayloadAttributes = inner.build(&parent);
+            attrs.min_base_fee = Some(0);
+            attrs
+        }
     }
 }
