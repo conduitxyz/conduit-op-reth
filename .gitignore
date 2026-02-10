@@ -5,6 +5,9 @@
 .idea/
 .claude
 
+# Dev mode datadir
+.devdata/
+
 # Coverage reports
 lcov.info
 target/llvm-cov/
