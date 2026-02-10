@@ -1,4 +1,4 @@
-.PHONY: build build-maxperf lint fmt clippy deny udeps docs test pr pr-fix
+.PHONY: build build-maxperf lint fmt clippy deny udeps docs test pr pr-fix dev re-execute debug
 
 build:
 	cargo build --release
@@ -38,3 +38,13 @@ docs:
 test:
 	@echo "Running tests..."
 	cargo test --workspace
+
+dev: debug
+	rm -rf .devdata
+	./target/debug/conduit-op-reth node --dev --dev.block-time 2s --chain ./tests/fixtures/saigon-genesis.json --datadir ./.devdata
+
+re-execute: debug
+	./target/debug/conduit-op-reth re-execute --chain ./tests/fixtures/saigon-genesis.json --datadir ./.devdata
+
+debug:
+	cargo build

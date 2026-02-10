@@ -25,6 +25,16 @@ cd conduit-op-reth
 cargo build --profile maxperf
 ```
 
+### Local Dev Chain
+
+Run a local OP Stack chain with 2-second block times:
+
+```bash
+make dev
+```
+
+This builds a debug binary, clears any previous state, and starts the node using the Saigon test genesis.
+
 ## License
 
 TBD
