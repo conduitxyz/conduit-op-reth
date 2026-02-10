@@ -57,7 +57,7 @@ jobs:
 
   clippy:
     name: Clippy lint
-    runs-on: ubuntu-latest-4core
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -78,7 +78,7 @@ jobs:
 
   deny:
     name: Security audit
-    runs-on: ubuntu-latest-4core
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -126,7 +126,7 @@ jobs:
 
   test:
     name: Run tests
-    runs-on: ubuntu-latest-16core
+    runs-on: ubuntu-latest-4core
     steps:
       - uses: actions/checkout@v4
 
