@@ -148,6 +148,12 @@ where
         // This allows us to run --dev mode. Fixed in upstream https://github.com/paradigmxyz/reth/pull/21855/changes
         move |parent: SealedHeader| {
             let mut attrs: op_alloy_rpc_types_engine::OpPayloadAttributes = inner.build(&parent);
+
+            // Encode default OP EIP-1559 params: denominator=50, elasticity=6
+            attrs.eip_1559_params = Some(alloy_primitives::B64::from_slice(&[
+                0, 0, 0, 50, // denominator
+                0, 0, 0, 6, // elasticity
+            ]));
             attrs.min_base_fee = Some(0);
             attrs
         }
