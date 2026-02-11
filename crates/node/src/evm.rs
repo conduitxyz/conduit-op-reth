@@ -5,7 +5,6 @@
 
 use crate::{
     chainspec::ConduitOpChainSpec,
-    hardforks::{ConduitOpHardfork, ConduitOpHardforks},
     state_override_fork0::ensure_state_override_fork0,
 };
 use alloy_consensus::Header;
@@ -45,7 +44,6 @@ use revm::{
     database::{DatabaseCommit, State},
 };
 use std::sync::Arc;
-use tracing::info;
 
 /// Custom block executor wrapping [`OpBlockExecutor`].
 ///
