@@ -256,19 +256,6 @@ where
     type EVM = ConduitOpEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        let chain_spec = ctx.chain_spec();
-
-        if let Some(ref config) = chain_spec.state_override_fork0 {
-            let activation =
-                chain_spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0);
-            info!(
-                target: "conduit_op::executor",
-                ?activation,
-                num_updates = config.updates.len(),
-                "StateOverrideFork0 configured"
-            );
-        }
-
-        Ok(ConduitOpEvmConfig::new(chain_spec))
+        Ok(ConduitOpEvmConfig::new(ctx.chain_spec()))
     }
 }
