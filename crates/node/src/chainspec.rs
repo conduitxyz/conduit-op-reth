@@ -76,19 +76,7 @@ impl EthChainSpec for ConduitOpChainSpec {
     }
 
     fn display_hardforks(&self) -> Box<dyn core::fmt::Display> {
-        let inner = self.inner.display_hardforks().to_string();
-        let conduit = match &self.state_override_fork0 {
-            Some(config) => {
-                let activation =
-                    self.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0);
-                format!(
-                    "\nConduit StateOverrideFork0: {activation:?}, updates={}",
-                    config.updates.len()
-                )
-            }
-            None => String::new(),
-        };
-        Box::new(format!("{inner}{conduit}"))
+        self.inner.display_hardforks()
     }
 
     fn genesis_header(&self) -> &Self::Header {

@@ -3,11 +3,7 @@
 //! Wraps the standard OP EVM config and block executor to apply state overrides
 //! at the `StateOverrideFork0` activation block.
 
-use crate::{
-    chainspec::ConduitOpChainSpec,
-    hardforks::{ConduitOpHardfork, ConduitOpHardforks},
-    state_override_fork0::ensure_state_override_fork0,
-};
+use crate::{chainspec::ConduitOpChainSpec, state_override_fork0::ensure_state_override_fork0};
 use alloy_consensus::Header;
 use alloy_eips::Decodable2718;
 use alloy_evm::{
@@ -45,7 +41,6 @@ use revm::{
     database::{DatabaseCommit, State},
 };
 use std::sync::Arc;
-use tracing::info;
 
 /// Custom block executor wrapping [`OpBlockExecutor`].
 ///
@@ -256,19 +251,6 @@ where
     type EVM = ConduitOpEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        let chain_spec = ctx.chain_spec();
-
-        if let Some(ref config) = chain_spec.state_override_fork0 {
-            let activation =
-                chain_spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0);
-            info!(
-                target: "conduit_op::executor",
-                ?activation,
-                num_updates = config.updates.len(),
-                "StateOverrideFork0 configured"
-            );
-        }
-
-        Ok(ConduitOpEvmConfig::new(chain_spec))
+        Ok(ConduitOpEvmConfig::new(ctx.chain_spec()))
     }
 }
