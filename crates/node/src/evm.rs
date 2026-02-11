@@ -3,10 +3,7 @@
 //! Wraps the standard OP EVM config and block executor to apply state overrides
 //! at the `StateOverrideFork0` activation block.
 
-use crate::{
-    chainspec::ConduitOpChainSpec,
-    state_override_fork0::ensure_state_override_fork0,
-};
+use crate::{chainspec::ConduitOpChainSpec, state_override_fork0::ensure_state_override_fork0};
 use alloy_consensus::Header;
 use alloy_eips::Decodable2718;
 use alloy_evm::{

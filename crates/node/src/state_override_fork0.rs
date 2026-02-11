@@ -8,6 +8,7 @@ use crate::{chainspec::StateOverrideFork0Config, hardforks::ConduitOpHardforks};
 use alloy_evm::Database;
 use alloy_primitives::U256;
 use revm::{DatabaseCommit, bytecode::Bytecode, primitives::HashMap, state::EvmStorageSlot};
+use tracing::info;
 
 /// Applies state updates configured for `StateOverrideFork0` at the transition block.
 ///
@@ -38,6 +39,8 @@ where
     {
         return Ok(());
     }
+
+    info!("Executing state override fork0 at {}", timestamp);
 
     for (&address, account) in &config.updates {
         let mut acc_info = db.basic(address)?.unwrap_or_default();
