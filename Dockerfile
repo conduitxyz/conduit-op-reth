@@ -79,3 +79,22 @@ ARG BUILD_PROFILE=maxperf
 COPY --from=conduit-op-reth-build /app/target/$BUILD_PROFILE/conduit-op-reth /app/conduit-op-reth
 RUN ln -s /app/conduit-op-reth /usr/local/bin/op-reth
 ENTRYPOINT ["/app/conduit-op-reth"]
+
+#
+# Kubernetes-ready runtime container (with supervisord, kubectl, health checks)
+#
+FROM conduit-op-reth-runtime AS conduit-op-reth-k8s
+ARG TARGETPLATFORM
+RUN apt update && apt install -y supervisor byobu && rm -rf /var/lib/apt/lists/*
+# kubectl v1.25.0 checksums — update these when bumping the version
+RUN set -eux; \
+    case "$TARGETPLATFORM" in \
+      "linux/arm64") ARCH="arm64"; CHECKSUM="24db547bbae294c5c44f2b4a777e45f0e2f3d6295eace0d0c4be2b2dfa45330d" ;; \
+      *)             ARCH="amd64"; CHECKSUM="e23cc7092218c95c22d8ee36fb9499194a36ac5b5349ca476886b7edc0203885" ;; \
+    esac; \
+    curl -LO "https://storage.googleapis.com/kubernetes-release/release/v1.25.0/bin/linux/${ARCH}/kubectl" && \
+    echo "${CHECKSUM}  kubectl" | sha256sum --check && \
+    chmod +x ./kubectl && \
+    mv ./kubectl /usr/local/bin/kubectl
+COPY scripts/check_sync_status.sh /usr/local/bin/check_sync_status.sh
+RUN chmod +x /usr/local/bin/check_sync_status.sh

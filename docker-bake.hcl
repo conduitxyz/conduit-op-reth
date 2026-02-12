@@ -20,6 +20,7 @@ target "_dev" {
 target "conduit-op-reth" {
     inherits = ["_dev"]
     dockerfile = "Dockerfile"
+    target = "conduit-op-reth-k8s"
     tags = ["conduit-op-reth"]
 }
 
