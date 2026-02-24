@@ -2071,6 +2071,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "vergen",
+ "vergen-git2",
 ]
 
 [[package]]
