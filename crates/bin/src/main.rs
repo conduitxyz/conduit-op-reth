@@ -1,5 +1,7 @@
 #![allow(missing_docs, rustdoc::missing_crate_level_docs)]
 
+mod version;
+
 use clap::Parser;
 use conduit_op_reth_node::{
     chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser},
@@ -13,12 +15,16 @@ use reth_optimism_consensus::OpBeaconConsensus;
 use reth_optimism_node::args::RollupArgs;
 use std::sync::Arc;
 use tracing::info;
+use version::init_conduit_version;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
 fn main() {
     reth_cli_util::sigsegv_handler::install();
+
+    // Initialize conduit-op-reth version metadata before CLI parsing
+    init_conduit_version().expect("Failed to initialize conduit-op-reth version metadata");
 
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe {

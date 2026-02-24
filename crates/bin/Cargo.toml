@@ -16,11 +16,16 @@ reth-ethereum-cli.workspace = true
 reth-optimism-consensus.workspace = true
 reth-optimism-node.workspace = true
 reth-node-builder = { workspace = true, features = ["op"] }
+reth-node-core.workspace = true
 reth-db.workspace = true
 reth-cli-util.workspace = true
 
 clap.workspace = true
 tracing.workspace = true
+
+[build-dependencies]
+vergen = { version = "9.1", features = ["build", "cargo", "emit_and_set"] }
+vergen-git2 = "9.1"
 
 [dev-dependencies]
 conduit-op-reth-node.workspace = true
