@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, B64, B256, Bytes, b256};
+use alloy_primitives::{Address, B64, B256, Bytes, b256, hex};
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
@@ -6,6 +6,11 @@ use reth_optimism_node::OpPayloadBuilderAttributes;
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::WithEncoded;
 use std::sync::Arc;
+
+/// OP Mainnet L1 block info deposit tx at index 0 in block 124665056.
+const TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056: [u8; 251] = hex!(
+    "7ef8f8a0683079df94aa5b9cf86687d739a60a9b4f0835e520ec4d664e2e415dca17a6df94deaddeaddeaddeaddeaddeaddeaddeaddead00019442000000000000000000000000000000000000158080830f424080b8a4440a5e200000146b000f79c500000000000000040000000066d052e700000000013ad8a3000000000000000000000000000000000000000000000000000000003ef1278700000000000000000000000000000000000000000000000000000000000000012fdf87b89884a61e74b322bbcf60386f543bfae7827725efaaf0ab1de2294a590000000000000000000000006887246668a3b87f54deb3b94ba47a6f63f32985"
+);
 
 pub mod genesis_validation_test;
 pub mod state_override_test;
@@ -45,9 +50,7 @@ pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
         parent_beacon_block_root: Some(B256::ZERO),
     };
 
-    let l1_info_raw = Bytes::from_static(
-        &reth_optimism_chainspec::constants::TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056,
-    );
+    let l1_info_raw = Bytes::from_static(&TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056);
     let l1_info_tx = T::decode_2718(&mut l1_info_raw.as_ref())
         .expect("failed to decode L1 block info deposit tx");
 

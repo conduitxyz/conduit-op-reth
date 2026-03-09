@@ -4,7 +4,7 @@
 //! at the `StateOverrideFork0` activation block.
 
 use crate::{chainspec::ConduitOpChainSpec, state_override_fork0::ensure_state_override_fork0};
-use alloy_consensus::Header;
+use alloy_consensus::{Header, TransactionEnvelope};
 use alloy_eips::Decodable2718;
 use alloy_evm::{
     Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
@@ -15,7 +15,7 @@ use alloy_evm::{
 };
 use alloy_op_evm::{
     OpBlockExecutionCtx, OpBlockExecutor, OpEvmFactory,
-    block::{OpTxEnv, receipt_builder::OpReceiptBuilder},
+    block::{OpTxEnv, OpTxResult, receipt_builder::OpReceiptBuilder},
 };
 use alloy_primitives::Bytes;
 use op_alloy_consensus::EIP1559ParamError;
@@ -37,7 +37,7 @@ use reth_primitives_traits::{
 };
 use reth_storage_errors::any::AnyError;
 use revm::{
-    context::{Block, result::ResultAndState},
+    context::Block,
     database::{DatabaseCommit, State},
 };
 use std::sync::Arc;
@@ -66,6 +66,7 @@ where
     type Transaction = R::Transaction;
     type Receipt = R::Receipt;
     type Evm = E;
+    type Result = OpTxResult<E::HaltReason, <R::Transaction as TransactionEnvelope>::TxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.inner.apply_pre_execution_changes()?;
@@ -87,16 +88,12 @@ where
     fn execute_transaction_without_commit(
         &mut self,
         tx: impl ExecutableTx<Self>,
-    ) -> Result<ResultAndState<<Self::Evm as Evm>::HaltReason>, BlockExecutionError> {
+    ) -> Result<Self::Result, BlockExecutionError> {
         self.inner.execute_transaction_without_commit(tx)
     }
 
-    fn commit_transaction(
-        &mut self,
-        output: ResultAndState<<Self::Evm as Evm>::HaltReason>,
-        tx: impl ExecutableTx<Self>,
-    ) -> Result<u64, BlockExecutionError> {
-        self.inner.commit_transaction(output, tx)
+    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
+        self.inner.commit_transaction(output)
     }
 
     fn finish(
