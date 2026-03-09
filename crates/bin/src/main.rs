@@ -37,7 +37,7 @@ fn main() {
             |spec: Arc<ConduitOpChainSpec>| {
                 (ConduitOpEvmConfig::new(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
             },
-            |builder: WithLaunchContext<NodeBuilder<Arc<DatabaseEnv>, ConduitOpChainSpec>>,
+            |builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
              rollup_args| async move {
                 info!(target: "reth::cli", "Launching conduit-op-reth node");
                 let handle = builder
