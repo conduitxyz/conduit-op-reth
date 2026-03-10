@@ -137,8 +137,6 @@ where
 
     info!("Executing state override fork0 at {}", timestamp);
 
-    let mut changes = HashMap::default();
-
     for (&address, account) in &config.updates {
         let mut acc_info = db.basic(address)?.unwrap_or_default();
 
@@ -154,15 +152,12 @@ where
             for (&key, &value) in storage {
                 let key = U256::from_be_bytes(key.0);
                 let value = U256::from_be_bytes(value.0);
-                let old = db.storage(address, key)?;
-                revm_acc.storage.insert(key, EvmStorageSlot::new_changed(old, value, 0));
+                revm_acc.storage.insert(key, EvmStorageSlot::new_changed(U256::ZERO, value, 0));
             }
         }
 
-        changes.insert(address, revm_acc);
+        db.commit(HashMap::from_iter([(address, revm_acc)]));
     }
-
-    db.commit(changes);
 
     Ok(())
 }
