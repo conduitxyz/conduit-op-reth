@@ -1,7 +1,7 @@
 use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks};
 use alloy_consensus::Header;
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, B256, Bytes};
+use conduit_evm::state_override::StateOverrideFork0Config;
 use reth_chainspec::{
     Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
     ForkFilter, ForkId, Hardfork, Hardforks, Head,
@@ -9,31 +9,7 @@ use reth_chainspec::{
 use reth_cli::chainspec::{ChainSpecParser, parse_genesis};
 use reth_optimism_chainspec::{OpChainSpec, SUPPORTED_CHAINS, generated_chain_value_parser};
 use reth_optimism_forks::{OpHardfork, OpHardforks};
-use serde::Deserialize;
-use std::{collections::HashMap, sync::Arc};
-
-/// Account state to apply during a state override hardfork.
-///
-/// Only `code` and `storage` are supported — these are the fields relevant for
-/// hardfork state transitions. Unlike `alloy_genesis::GenesisAccount`, all fields
-/// are optional and there are no strict serde requirements.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StateOverrideAccount {
-    /// Bytecode to deploy at this address.
-    #[serde(default)]
-    pub code: Option<Bytes>,
-    /// Storage slots to set at this address.
-    #[serde(default)]
-    pub storage: Option<std::collections::BTreeMap<B256, B256>>,
-}
-
-/// Configuration for the StateOverrideFork0 hardfork.
-#[derive(Debug, Clone)]
-pub struct StateOverrideFork0Config {
-    /// Account state updates to apply at activation, keyed by address.
-    pub updates: HashMap<Address, StateOverrideAccount>,
-}
+use std::sync::Arc;
 
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
 ///
@@ -144,25 +120,6 @@ impl ConduitOpHardforks for ConduitOpChainSpec {
     }
 }
 
-/// Top-level extra fields in genesis `config` containing the `"conduit"` key.
-#[derive(Debug, Deserialize, Default)]
-struct GenesisExtraFields {
-    conduit: Option<ConduitOpGenesisConfig>,
-}
-
-/// Raw JSON structure for the `"conduit"` section in genesis `config`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ConduitOpGenesisConfig {
-    state_override_fork0: Option<StateOverrideFork0Raw>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StateOverrideFork0Raw {
-    time: u64,
-    updates: HashMap<Address, StateOverrideAccount>,
-}
-
 /// ConduitOp chain specification parser.
 ///
 /// Parses standard OP chain specs and additionally extracts the `"conduit"` section
@@ -188,26 +145,21 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
         // Parse genesis JSON.
         let genesis: Genesis = parse_genesis(s)?;
 
-        // Extract conduit config from extra_fields before converting to OpChainSpec.
-        let extras: GenesisExtraFields = genesis
-            .config
-            .extra_fields
-            .deserialize_as()
+        // Extract conduit config from extra_fields using the shared parser.
+        let parsed = conduit_evm::state_override::parse_state_override_config(&genesis)
             .map_err(|e| eyre::eyre!("failed to deserialize conduit config: {e}"))?;
-
-        let raw_fork0 = extras.conduit.and_then(|c| c.state_override_fork0);
 
         // Convert genesis to OpChainSpec (handles all OP hardfork parsing).
         let mut op_chain_spec: OpChainSpec = genesis.into();
 
         // Register custom hardfork in the inner hardfork list so it appears in
         // fork IDs, fork filters, and forks_iter().
-        let state_override_fork0 = raw_fork0.map(|raw| {
-            op_chain_spec
-                .inner
-                .hardforks
-                .insert(ConduitOpHardfork::StateOverrideFork0, ForkCondition::Timestamp(raw.time));
-            StateOverrideFork0Config { updates: raw.updates }
+        let state_override_fork0 = parsed.map(|config| {
+            op_chain_spec.inner.hardforks.insert(
+                ConduitOpHardfork::StateOverrideFork0,
+                ForkCondition::Timestamp(config.activation_time),
+            );
+            config
         });
 
         Ok(Arc::new(ConduitOpChainSpec { inner: op_chain_spec, state_override_fork0 }))
@@ -217,6 +169,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::Address;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);

@@ -1,0 +1,15 @@
+[package]
+name = "conduit-evm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Shared Conduit EVM logic: custom fork transitions and state overrides"
+
+[dependencies]
+alloy-primitives.workspace = true
+alloy-genesis.workspace = true
+revm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

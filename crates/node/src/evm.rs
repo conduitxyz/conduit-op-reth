@@ -3,7 +3,7 @@
 //! Wraps the standard OP EVM config and block executor to apply state overrides
 //! at the `StateOverrideFork0` activation block.
 
-use crate::{chainspec::ConduitOpChainSpec, state_override_fork0::ensure_state_override_fork0};
+use crate::chainspec::ConduitOpChainSpec;
 use alloy_consensus::Header;
 use alloy_eips::Decodable2718;
 use alloy_evm::{
@@ -18,6 +18,7 @@ use alloy_op_evm::{
     block::{OpTxEnv, receipt_builder::OpReceiptBuilder},
 };
 use alloy_primitives::Bytes;
+use conduit_evm::state_override::ensure_state_override_fork0;
 use op_alloy_consensus::EIP1559ParamError;
 use op_alloy_rpc_types_engine::OpExecutionData;
 use op_revm::OpSpecId;
@@ -73,7 +74,6 @@ where
         // Apply state overrides at the StateOverrideFork0 transition block.
         if let Some(ref config) = self.chain_spec.state_override_fork0 {
             ensure_state_override_fork0(
-                self.chain_spec.as_ref(),
                 self.inner.evm.block().timestamp().saturating_to(),
                 config,
                 self.inner.evm.db_mut(),

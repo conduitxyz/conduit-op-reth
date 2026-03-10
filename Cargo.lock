@@ -2031,6 +2031,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "conduit-evm"
+version = "1.0.1"
+dependencies = [
+ "alloy-genesis",
+ "alloy-primitives",
+ "revm",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "conduit-op-reth"
 version = "1.0.1"
 dependencies = [
@@ -2086,6 +2098,7 @@ dependencies = [
  "alloy-op-evm",
  "alloy-primitives",
  "alloy-rpc-types-eth",
+ "conduit-evm",
  "eyre",
  "op-alloy-consensus",
  "op-alloy-rpc-types-engine",
@@ -2107,9 +2120,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-storage-errors",
  "revm",
- "serde",
  "serde_json",
- "tracing",
 ]
 
 [[package]]

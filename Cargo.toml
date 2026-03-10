@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 # Internal
+conduit-evm = { path = "crates/conduit-evm" }
 conduit-op-reth-node = { path = "crates/node" }
 
 # Reth (git @ v1.10.2)
