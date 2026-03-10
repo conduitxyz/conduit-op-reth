@@ -154,12 +154,12 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         // Register custom hardfork in the inner hardfork list so it appears in
         // fork IDs, fork filters, and forks_iter().
-        let state_override_fork0 = parsed.map(|config| {
+        let state_override_fork0 = parsed.map(|parsed| {
             op_chain_spec.inner.hardforks.insert(
                 ConduitOpHardfork::StateOverrideFork0,
-                ForkCondition::Timestamp(config.activation_time),
+                ForkCondition::Timestamp(parsed.activation_time),
             );
-            config
+            parsed.config
         });
 
         Ok(Arc::new(ConduitOpChainSpec { inner: op_chain_spec, state_override_fork0 }))

@@ -3,7 +3,10 @@
 //! Wraps the standard OP EVM config and block executor to apply state overrides
 //! at the `StateOverrideFork0` activation block.
 
-use crate::chainspec::ConduitOpChainSpec;
+use crate::{
+    chainspec::ConduitOpChainSpec,
+    hardforks::{ConduitOpHardfork, ConduitOpHardforks},
+};
 use alloy_consensus::Header;
 use alloy_eips::Decodable2718;
 use alloy_evm::{
@@ -73,8 +76,14 @@ where
 
         // Apply state overrides at the StateOverrideFork0 transition block.
         if let Some(ref config) = self.chain_spec.state_override_fork0 {
+            let activation_time = self
+                .chain_spec
+                .conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0)
+                .as_timestamp()
+                .expect("StateOverrideFork0 must have a timestamp when config is Some");
             ensure_state_override_fork0(
                 self.inner.evm.block().timestamp().saturating_to(),
+                activation_time,
                 config,
                 self.inner.evm.db_mut(),
             )

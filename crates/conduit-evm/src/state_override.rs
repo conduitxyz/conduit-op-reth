@@ -32,10 +32,11 @@ pub struct StateOverrideAccount {
 }
 
 /// Configuration for the StateOverrideFork0 hardfork.
+///
+/// Contains only the state updates to apply — activation timing is managed by the
+/// caller's chainspec, consistent with how other forks are configured.
 #[derive(Debug, Clone)]
 pub struct StateOverrideFork0Config {
-    /// Timestamp at which the fork activates.
-    pub activation_time: u64,
     /// Account state updates to apply at activation, keyed by address.
     pub updates: HashMap<Address, StateOverrideAccount>,
 }
@@ -63,14 +64,27 @@ struct StateOverrideFork0Raw {
     updates: HashMap<Address, StateOverrideAccount>,
 }
 
-/// Parses the `StateOverrideFork0Config` from a genesis's extra fields.
+/// Parsed result from genesis containing both the activation time and the config.
+///
+/// The activation time should be registered in the caller's chainspec (e.g. as a
+/// `ForkCondition::Timestamp`), while the config is passed to
+/// [`ensure_state_override_fork0`] at execution time.
+#[derive(Debug, Clone)]
+pub struct ParsedStateOverrideFork0 {
+    /// Timestamp at which the fork activates (for chainspec registration).
+    pub activation_time: u64,
+    /// State override configuration.
+    pub config: StateOverrideFork0Config,
+}
+
+/// Parses the `StateOverrideFork0` section from a genesis's extra fields.
 ///
 /// Returns `Ok(None)` if the genesis JSON does not contain a `conduit.stateOverrideFork0`
 /// section. Returns `Err` if the section exists but is malformed — callers should treat
 /// this as fatal since misconfigured state overrides can cause consensus failures.
 pub fn parse_state_override_config(
     genesis: &Genesis,
-) -> Result<Option<StateOverrideFork0Config>, serde_json::Error> {
+) -> Result<Option<ParsedStateOverrideFork0>, serde_json::Error> {
     let extras: GenesisExtraFields = genesis.config.extra_fields.deserialize_as()?;
 
     let Some(raw) = extras.conduit.and_then(|c| c.state_override_fork0) else {
@@ -83,7 +97,10 @@ pub fn parse_state_override_config(
         "Parsed StateOverrideFork0 config from genesis"
     );
 
-    Ok(Some(StateOverrideFork0Config { activation_time: raw.time, updates: raw.updates }))
+    Ok(Some(ParsedStateOverrideFork0 {
+        activation_time: raw.time,
+        config: StateOverrideFork0Config { updates: raw.updates },
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +121,7 @@ pub fn parse_state_override_config(
 /// to detect the transition block without requiring the parent block's timestamp.
 pub fn ensure_state_override_fork0<DB>(
     timestamp: u64,
+    activation_time: u64,
     config: &StateOverrideFork0Config,
     db: &mut DB,
 ) -> Result<(), DB::Error>
@@ -112,8 +130,8 @@ where
 {
     // If the fork is active at the current timestamp but was not active at the previous block
     // timestamp (heuristically, OP Stack block time is 2s), then we are at the transition block.
-    let end = config.activation_time.saturating_add(2);
-    if timestamp < config.activation_time || timestamp >= end {
+    let end = activation_time.saturating_add(2);
+    if timestamp < activation_time || timestamp >= end {
         return Ok(());
     }
 
@@ -164,7 +182,7 @@ mod tests {
                 storage: None,
             },
         );
-        StateOverrideFork0Config { activation_time: 1000, updates }
+        StateOverrideFork0Config { updates }
     }
 
     fn storage_only_config() -> StateOverrideFork0Config {
@@ -175,7 +193,7 @@ mod tests {
             Address::with_last_byte(0x99),
             StateOverrideAccount { code: None, storage: Some(storage) },
         );
-        StateOverrideFork0Config { activation_time: 1000, updates }
+        StateOverrideFork0Config { updates }
     }
 
     fn mixed_config() -> StateOverrideFork0Config {
@@ -189,8 +207,10 @@ mod tests {
                 storage: Some(storage),
             },
         );
-        StateOverrideFork0Config { activation_time: 1000, updates }
+        StateOverrideFork0Config { updates }
     }
+
+    const FORK_TIME: u64 = 1000;
 
     /// Core happy-path: bytecode injected at exact transition timestamp.
     #[test]
@@ -198,7 +218,7 @@ mod tests {
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(FORK_TIME, FORK_TIME, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x42);
         let info = db.basic_ref(addr).unwrap().expect("account should exist");
@@ -213,7 +233,7 @@ mod tests {
         let config = mixed_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(FORK_TIME, FORK_TIME, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x42);
         let info = db.basic_ref(addr).unwrap().expect("account should exist");
@@ -230,7 +250,7 @@ mod tests {
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(998, &config, &mut db).unwrap();
+        ensure_state_override_fork0(998, FORK_TIME, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply before fork activates");
@@ -242,7 +262,7 @@ mod tests {
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(1002, &config, &mut db).unwrap();
+        ensure_state_override_fork0(1002, FORK_TIME, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply after transition block");
@@ -262,7 +282,7 @@ mod tests {
             },
         );
 
-        ensure_state_override_fork0(1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(FORK_TIME, FORK_TIME, &config, &mut db).unwrap();
 
         let info =
             db.basic_ref(Address::with_last_byte(0x42)).unwrap().expect("account should exist");
@@ -280,7 +300,7 @@ mod tests {
         let inner = InMemoryDB::default();
         let mut db = State::builder().with_database(inner).with_bundle_update().build();
 
-        ensure_state_override_fork0(1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(FORK_TIME, FORK_TIME, &config, &mut db).unwrap();
 
         db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
 
@@ -305,7 +325,7 @@ mod tests {
         );
         let mut db = State::builder().with_database(inner).with_bundle_update().build();
 
-        ensure_state_override_fork0(1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(FORK_TIME, FORK_TIME, &config, &mut db).unwrap();
 
         db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
 
@@ -325,7 +345,7 @@ mod tests {
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(FORK_TIME, FORK_TIME, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x42);
         let new_code = Bytes::from_static(&[0x01, 0x02]);
@@ -338,7 +358,7 @@ mod tests {
             },
         );
 
-        ensure_state_override_fork0(1002, &config, &mut db).unwrap();
+        ensure_state_override_fork0(1002, FORK_TIME, &config, &mut db).unwrap();
 
         let info = db.basic_ref(addr).unwrap().expect("account should exist");
         assert_eq!(
@@ -348,16 +368,13 @@ mod tests {
         );
     }
 
-    /// Fork time = None equivalent (activation_time far in the future) → no-op.
+    /// Fork time far in the future → no-op.
     #[test]
     fn no_op_when_fork_not_active() {
-        let config = StateOverrideFork0Config {
-            activation_time: u64::MAX,
-            updates: bytecode_config().updates,
-        };
+        let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(1000, &config, &mut db).unwrap();
+        ensure_state_override_fork0(1000, u64::MAX, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply when fork is not active");
@@ -387,16 +404,16 @@ mod tests {
         }"#;
 
         let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
-        let config = parse_state_override_config(&genesis)
+        let parsed = parse_state_override_config(&genesis)
             .expect("should parse without error")
             .expect("should have conduit config");
 
-        assert_eq!(config.activation_time, 1234567890);
-        assert_eq!(config.updates.len(), 1);
+        assert_eq!(parsed.activation_time, 1234567890);
+        assert_eq!(parsed.config.updates.len(), 1);
 
         let addr: Address = "0x4200000000000000000000000000000000000042".parse().unwrap();
         assert_eq!(
-            config.updates[&addr].code.as_ref().unwrap(),
+            parsed.config.updates[&addr].code.as_ref().unwrap(),
             &Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52]),
         );
     }
