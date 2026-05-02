@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, B64, B256, Bytes, b256};
+use alloy_primitives::{Address, B64, B256, Bytes, b256, hex};
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
@@ -45,9 +45,14 @@ pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
         parent_beacon_block_root: Some(B256::ZERO),
     };
 
-    let l1_info_raw = Bytes::from_static(
-        &reth_optimism_chainspec::constants::TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056,
+    // L1 block info "set L1 block" deposit tx from OP mainnet block 124665056.
+    // Inlined here because the constant is no longer pub-exported from
+    // `reth-optimism-chainspec` after the op-reth crate split.
+    // <https://optimistic.etherscan.io/tx/0x312e290cf36df704a2217b015d6455396830b0ce678b860ebfcc30f41403d7b1>
+    const TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056: [u8; 251] = hex!(
+        "7ef8f8a0683079df94aa5b9cf86687d739a60a9b4f0835e520ec4d664e2e415dca17a6df94deaddeaddeaddeaddeaddeaddeaddeaddead00019442000000000000000000000000000000000000158080830f424080b8a4440a5e200000146b000f79c500000000000000040000000066d052e700000000013ad8a3000000000000000000000000000000000000000000000000000000003ef1278700000000000000000000000000000000000000000000000000000000000000012fdf87b89884a61e74b322bbcf60386f543bfae7827725efaaf0ab1de2294a590000000000000000000000006887246668a3b87f54deb3b94ba47a6f63f32985"
     );
+    let l1_info_raw = Bytes::from_static(&TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056);
     let l1_info_tx = T::decode_2718(&mut l1_info_raw.as_ref())
         .expect("failed to decode L1 block info deposit tx");
 
@@ -120,17 +125,18 @@ fn test_node_config(chain_spec: Arc<ConduitOpChainSpec>) -> NodeConfig<ConduitOp
 /// Launch a test node from a chain spec.
 ///
 /// Must be a macro: `NodeBuilder::launch()` returns an unnameable `impl` type.
-/// The returned `TaskManager` must be held alive for the test duration.
+/// The returned `Runtime` must be held alive for the test duration.
 macro_rules! launch_test_node {
     ($chain_spec:expr) => {{
         use reth_e2e_test_utils::node::NodeTestContext;
         use reth_node_builder::{NodeBuilder, NodeHandle};
-        use reth_tasks::TaskManager;
+        use reth_tasks::Runtime as TaskRuntime;
 
-        let tasks = TaskManager::current();
+        let tasks = TaskRuntime::with_existing_handle(tokio::runtime::Handle::current())
+            .expect("failed to create task runtime");
         let node_config = crate::e2e::test_node_config($chain_spec);
         let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
-            .testing_node(tasks.executor())
+            .testing_node(tasks.clone())
             .node(conduit_op_reth_node::node::ConduitOpNode::default())
             .launch()
             .await?;
