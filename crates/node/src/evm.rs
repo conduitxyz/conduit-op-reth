@@ -28,7 +28,7 @@ use reth_evm::{
 use reth_node_builder::{BuilderContext, NodeTypes, components::ExecutorBuilder};
 use reth_optimism_evm::{
     OpBlockAssembler, OpBlockExecutorFactory, OpEvmConfig, OpNextBlockEnvAttributes,
-    OpRethReceiptBuilder,
+    OpRethReceiptBuilder, OpTx,
 };
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_primitives::OpPrimitives;
@@ -37,7 +37,7 @@ use reth_primitives_traits::{
 };
 use reth_storage_errors::any::AnyError;
 use revm::{
-    context::{Block, result::ResultAndState},
+    context::Block,
     database::{DatabaseCommit, State},
 };
 use std::sync::Arc;
@@ -66,6 +66,7 @@ where
     type Transaction = R::Transaction;
     type Receipt = R::Receipt;
     type Evm = E;
+    type Result = <OpBlockExecutor<E, R, Spec> as BlockExecutor>::Result;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.inner.apply_pre_execution_changes()?;
@@ -87,16 +88,12 @@ where
     fn execute_transaction_without_commit(
         &mut self,
         tx: impl ExecutableTx<Self>,
-    ) -> Result<ResultAndState<<Self::Evm as Evm>::HaltReason>, BlockExecutionError> {
+    ) -> Result<Self::Result, BlockExecutionError> {
         self.inner.execute_transaction_without_commit(tx)
     }
 
-    fn commit_transaction(
-        &mut self,
-        output: ResultAndState<<Self::Evm as Evm>::HaltReason>,
-        tx: impl ExecutableTx<Self>,
-    ) -> Result<u64, BlockExecutionError> {
-        self.inner.commit_transaction(output, tx)
+    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
+        self.inner.commit_transaction(output)
     }
 
     fn finish(
@@ -146,7 +143,7 @@ impl ConfigureEvm for ConduitOpEvmConfig {
     type Error = EIP1559ParamError;
     type NextBlockEnvCtx = OpNextBlockEnvAttributes;
     type BlockExecutorFactory =
-        OpBlockExecutorFactory<OpRethReceiptBuilder, Arc<ConduitOpChainSpec>, OpEvmFactory>;
+        OpBlockExecutorFactory<OpRethReceiptBuilder, Arc<ConduitOpChainSpec>, OpEvmFactory<OpTx>>;
     type BlockAssembler = OpBlockAssembler<ConduitOpChainSpec>;
 
     fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
@@ -186,7 +183,7 @@ impl ConfigureEvm for ConduitOpEvmConfig {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: <OpEvmFactory as EvmFactory>::Evm<&'a mut State<DB>, I>,
+        evm: <OpEvmFactory<OpTx> as EvmFactory>::Evm<&'a mut State<DB>, I>,
         ctx: OpBlockExecutionCtx,
     ) -> impl BlockExecutorFor<'a, Self::BlockExecutorFactory, DB, I>
     where
