@@ -115,7 +115,7 @@ mod tests {
                 storage: None,
             },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { time: 1000, updates }
     }
 
     fn storage_only_config() -> StateOverrideFork0Config {
@@ -126,7 +126,7 @@ mod tests {
             Address::with_last_byte(0x99),
             StateOverrideAccount { code: None, storage: Some(storage) },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { time: 1000, updates }
     }
 
     fn mixed_config() -> StateOverrideFork0Config {
@@ -140,7 +140,7 @@ mod tests {
                 storage: Some(storage),
             },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { time: 1000, updates }
     }
 
     /// Core happy-path: bytecode injected at exact transition timestamp.
