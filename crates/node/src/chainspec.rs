@@ -31,15 +31,18 @@ pub struct StateOverrideAccount {
 /// Configuration for the StateOverrideFork0 hardfork.
 #[derive(Debug, Clone)]
 pub struct StateOverrideFork0Config {
+    /// Timestamp at which StateOverrideFork0 activates.
+    pub time: u64,
     /// Account state updates to apply at activation, keyed by address.
     pub updates: HashMap<Address, StateOverrideAccount>,
 }
 
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
 ///
-/// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list so they
-/// participate in fork IDs, fork filters, and `forks_iter()`. The `state_override_fork0`
-/// field carries the associated state update data consumed by the block executor.
+/// Custom hardforks are not registered in the inner [`OpChainSpec`] hardfork list, so they do
+/// not participate in fork IDs, fork filters, or `forks_iter()`. The `state_override_fork0`
+/// field carries the activation timestamp and associated state update data consumed by the
+/// block executor.
 #[derive(Debug, Clone)]
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
@@ -140,7 +143,13 @@ impl OpHardforks for ConduitOpChainSpec {
 
 impl ConduitOpHardforks for ConduitOpChainSpec {
     fn conduit_op_fork_activation(&self, fork: ConduitOpHardfork) -> ForkCondition {
-        self.fork(fork)
+        match fork {
+            ConduitOpHardfork::StateOverrideFork0 => self
+                .state_override_fork0
+                .as_ref()
+                .map(|config| ForkCondition::Timestamp(config.time))
+                .unwrap_or(ForkCondition::Never),
+        }
     }
 }
 
@@ -197,18 +206,12 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         let raw_fork0 = extras.conduit.and_then(|c| c.state_override_fork0);
 
-        // Convert genesis to OpChainSpec (handles all OP hardfork parsing).
-        let mut op_chain_spec: OpChainSpec = genesis.into();
+        // Convert genesis to OpChainSpec (handles all OP hardfork parsing). Custom ConduitOp
+        // forks are tracked separately so they can execute without changing EIP-2124 fork IDs.
+        let op_chain_spec: OpChainSpec = genesis.into();
 
-        // Register custom hardfork in the inner hardfork list so it appears in
-        // fork IDs, fork filters, and forks_iter().
-        let state_override_fork0 = raw_fork0.map(|raw| {
-            op_chain_spec
-                .inner
-                .hardforks
-                .insert(ConduitOpHardfork::StateOverrideFork0, ForkCondition::Timestamp(raw.time));
-            StateOverrideFork0Config { updates: raw.updates }
-        });
+        let state_override_fork0 =
+            raw_fork0.map(|raw| StateOverrideFork0Config { time: raw.time, updates: raw.updates });
 
         Ok(Arc::new(ConduitOpChainSpec { inner: op_chain_spec, state_override_fork0 }))
     }
@@ -312,6 +315,7 @@ mod tests {
         let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
 
         let config = spec.state_override_fork0.as_ref().expect("should have conduit config");
+        assert_eq!(config.time, 1234567890);
         assert_eq!(config.updates.len(), 2);
 
         assert_eq!(
@@ -346,12 +350,19 @@ mod tests {
     }
 
     #[test]
-    fn forks_iter_includes_custom_fork() {
+    fn custom_fork_has_activation_without_registration() {
         let spec = parse_spec(&with_conduit_fork(5000));
+
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
+            ForkCondition::Timestamp(5000),
+        );
+        assert!(spec.is_state_override_fork0_active_at_timestamp(5000));
+
         let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
         assert!(
-            names.contains(&"StateOverrideFork0"),
-            "forks_iter should include custom fork, got: {names:?}",
+            !names.contains(&"StateOverrideFork0"),
+            "forks_iter should not include custom fork, got: {names:?}",
         );
     }
 
@@ -383,26 +394,21 @@ mod tests {
     }
 
     #[test]
-    fn fork_ids_with_custom_fork() {
+    fn fork_ids_ignore_custom_fork() {
         use alloy_eips::eip2124::ForkHash;
 
         let spec = parse_spec(&with_conduit_fork(5000));
 
         let base_hash = ForkHash([0x8b, 0x51, 0xa7, 0xf5]);
-        let post_fork_hash = ForkHash([0xd3, 0xcd, 0x38, 0xf6]);
 
-        // Before activation: same base hash, next points to custom fork.
-        assert_eq!(spec.fork_id(&head_at(0)), ForkId { hash: base_hash, next: 5000 });
-        assert_eq!(spec.fork_id(&head_at(4999)), ForkId { hash: base_hash, next: 5000 });
+        // Even though the custom fork activates at 5000, it is not registered for fork ID
+        // calculation, so the EIP-2124 fork ID remains the plain OP fork ID.
+        assert_eq!(spec.fork_id(&head_at(0)), ForkId { hash: base_hash, next: 0 });
+        assert_eq!(spec.fork_id(&head_at(4999)), ForkId { hash: base_hash, next: 0 });
+        assert_eq!(spec.fork_id(&head_at(5000)), ForkId { hash: base_hash, next: 0 });
+        assert_eq!(spec.fork_id(&head_at(10000)), ForkId { hash: base_hash, next: 0 });
 
-        // At activation: hash changes, no further forks.
-        assert_eq!(spec.fork_id(&head_at(5000)), ForkId { hash: post_fork_hash, next: 0 });
-        assert_eq!(spec.fork_id(&head_at(10000)), ForkId { hash: post_fork_hash, next: 0 });
-
-        assert_eq!(spec.latest_fork_id(), ForkId { hash: post_fork_hash, next: 0 });
-
-        // fork_filter.current() must agree with fork_id() at each stage.
-        assert_eq!(spec.fork_filter(head_at(0)).current(), spec.fork_id(&head_at(0)));
+        assert_eq!(spec.latest_fork_id(), ForkId { hash: base_hash, next: 0 });
         assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
     }
 
