@@ -18,7 +18,6 @@ reth-optimism-consensus.workspace = true
 reth-optimism-node.workspace = true
 reth-node-builder = { workspace = true, features = ["op"] }
 reth-node-core.workspace = true
-reth-node-metrics.workspace = true
 reth-db.workspace = true
 reth-cli-util.workspace = true
 
@@ -36,7 +35,6 @@ jemalloc = [
     "reth-cli-util/jemalloc",
     "reth-ethereum-cli/jemalloc",
     "reth-node-core/jemalloc",
-    "reth-node-metrics/jemalloc",
 ]
 keccak-cache-global = [
     "alloy-primitives/keccak-cache-global",
