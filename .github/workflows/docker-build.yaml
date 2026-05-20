@@ -75,6 +75,7 @@ jobs:
           target: ${{ inputs.target }}
           build-args: |
             BUILD_PROFILE=maxperf
+            FEATURES=asm-keccak,jemalloc,keccak-cache-global,otlp
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
