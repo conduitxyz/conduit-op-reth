@@ -42,10 +42,11 @@ pub struct StateOverrideFork0Config {
 
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
 ///
-/// Custom hardforks are not registered in the inner [`OpChainSpec`] hardfork list, so they do
-/// not participate in fork IDs, fork filters, or `forks_iter()`. The `state_override_fork0`
-/// field carries the activation timestamp and associated state update data consumed by the
-/// block executor.
+/// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list by default so they
+/// participate in fork IDs, fork filters, and `forks_iter()`. The `state_override_fork0` field
+/// carries the activation timestamp and associated state update data consumed by the block
+/// executor. Some legacy networks are excluded from registering the custom fork for fork ID
+/// compatibility.
 #[derive(Debug, Clone)]
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
@@ -177,6 +178,14 @@ struct StateOverrideFork0Raw {
 
 const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
 
+// These legacy networks have existing peers that do not include StateOverrideFork0 in their
+// EIP-2124 fork ID.
+const STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS: &[u64] = &[901, 957];
+
+fn exclude_state_override_from_fork_id(op_chain_spec: &OpChainSpec) -> bool {
+    STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS.contains(&op_chain_spec.inner.genesis.config.chain_id)
+}
+
 fn use_legacy_genesis_header_for_known_chains(op_chain_spec: &mut OpChainSpec) -> bool {
     if !LEGACY_CANYON_GENESIS_CHAIN_IDS.contains(&op_chain_spec.inner.genesis.config.chain_id) {
         return false;
@@ -239,8 +248,23 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             );
         }
 
-        let state_override_fork0 =
-            raw_fork0.map(|raw| StateOverrideFork0Config { time: raw.time, updates: raw.updates });
+        let state_override_fork0 = raw_fork0.map(|raw| {
+            let config = StateOverrideFork0Config { time: raw.time, updates: raw.updates };
+
+            if exclude_state_override_from_fork_id(&op_chain_spec) {
+                eprintln!(
+                    "Excluding StateOverrideFork0 from fork ID calculation for chain ID {}",
+                    op_chain_spec.inner.genesis.config.chain_id
+                );
+            } else {
+                op_chain_spec.inner.hardforks.insert(
+                    ConduitOpHardfork::StateOverrideFork0,
+                    ForkCondition::Timestamp(config.time),
+                );
+            }
+
+            config
+        });
 
         Ok(Arc::new(ConduitOpChainSpec { inner: op_chain_spec, state_override_fork0 }))
     }
@@ -306,6 +330,13 @@ mod tests {
                 }
             }
         });
+        serde_json::to_string(&genesis).unwrap()
+    }
+
+    fn with_conduit_fork_for_chain(chain_id: u64, time: u64) -> String {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_fork(time)).unwrap();
+        genesis["config"]["chainId"] = serde_json::json!(chain_id);
         serde_json::to_string(&genesis).unwrap()
     }
 
@@ -422,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_fork_has_activation_without_registration() {
+    fn custom_fork_is_registered_by_default() {
         let spec = parse_spec(&with_conduit_fork(5000));
 
         assert_eq!(
@@ -433,8 +464,8 @@ mod tests {
 
         let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
         assert!(
-            !names.contains(&"StateOverrideFork0"),
-            "forks_iter should not include custom fork, got: {names:?}",
+            names.contains(&"StateOverrideFork0"),
+            "forks_iter should include custom fork, got: {names:?}",
         );
     }
 
@@ -466,22 +497,59 @@ mod tests {
     }
 
     #[test]
-    fn fork_ids_ignore_custom_fork() {
+    fn fork_ids_include_custom_fork_by_default() {
         use alloy_eips::eip2124::ForkHash;
 
         let spec = parse_spec(&with_conduit_fork(5000));
 
         let base_hash = ForkHash([0x8b, 0x51, 0xa7, 0xf5]);
+        let post_fork_hash = ForkHash([0xd3, 0xcd, 0x38, 0xf6]);
 
-        // Even though the custom fork activates at 5000, it is not registered for fork ID
-        // calculation, so the EIP-2124 fork ID remains the plain OP fork ID.
-        assert_eq!(spec.fork_id(&head_at(0)), ForkId { hash: base_hash, next: 0 });
-        assert_eq!(spec.fork_id(&head_at(4999)), ForkId { hash: base_hash, next: 0 });
-        assert_eq!(spec.fork_id(&head_at(5000)), ForkId { hash: base_hash, next: 0 });
-        assert_eq!(spec.fork_id(&head_at(10000)), ForkId { hash: base_hash, next: 0 });
+        // Before activation: same base hash, next points to custom fork.
+        assert_eq!(spec.fork_id(&head_at(0)), ForkId { hash: base_hash, next: 5000 });
+        assert_eq!(spec.fork_id(&head_at(4999)), ForkId { hash: base_hash, next: 5000 });
 
-        assert_eq!(spec.latest_fork_id(), ForkId { hash: base_hash, next: 0 });
+        // At activation: hash changes, no further forks.
+        assert_eq!(spec.fork_id(&head_at(5000)), ForkId { hash: post_fork_hash, next: 0 });
+        assert_eq!(spec.fork_id(&head_at(10000)), ForkId { hash: post_fork_hash, next: 0 });
+
+        assert_eq!(spec.latest_fork_id(), ForkId { hash: post_fork_hash, next: 0 });
+        assert_eq!(spec.fork_filter(head_at(0)).current(), spec.fork_id(&head_at(0)));
         assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
+    }
+
+    #[test]
+    fn excluded_chain_ids_keep_custom_fork_out_of_fork_ids() {
+        for &chain_id in STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS {
+            let json = with_conduit_fork_for_chain(chain_id, 5000);
+            let spec = parse_spec(&json);
+            let op_spec: OpChainSpec = {
+                let mut genesis: serde_json::Value = serde_json::from_str(&json).unwrap();
+                genesis["config"].as_object_mut().unwrap().remove("conduit");
+                let genesis: Genesis = serde_json::from_value(genesis).unwrap();
+                genesis.into()
+            };
+
+            assert_eq!(
+                spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
+                ForkCondition::Timestamp(5000),
+            );
+            assert!(spec.is_state_override_fork0_active_at_timestamp(5000));
+
+            let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
+            assert!(
+                !names.contains(&"StateOverrideFork0"),
+                "forks_iter should not include custom fork for chain {chain_id}, got: {names:?}",
+            );
+
+            for ts in [0, 4999, 5000, 10000] {
+                let head = head_at(ts);
+                assert_eq!(spec.fork_id(&head), op_spec.fork_id(&head));
+            }
+
+            assert_eq!(spec.latest_fork_id(), op_spec.latest_fork_id());
+            assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
+        }
     }
 
     /// Regression test: parse the saigon genesis fixture (used by e2e tests)
