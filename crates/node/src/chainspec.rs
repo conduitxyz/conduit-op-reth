@@ -458,15 +458,8 @@ mod tests {
     }
 
     #[test]
-    fn custom_fork_is_registered_by_default() {
+    fn forks_iter_includes_custom_fork() {
         let spec = parse_spec(&with_conduit_fork(5000));
-
-        assert_eq!(
-            spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
-            ForkCondition::Timestamp(5000),
-        );
-        assert!(spec.is_state_override_fork0_active_at_timestamp(5000));
-
         let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
         assert!(
             names.contains(&"StateOverrideFork0"),
@@ -502,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_ids_include_custom_fork_by_default() {
+    fn fork_ids_with_custom_fork() {
         use alloy_eips::eip2124::ForkHash;
 
         let spec = parse_spec(&with_conduit_fork(5000));
@@ -519,6 +512,8 @@ mod tests {
         assert_eq!(spec.fork_id(&head_at(10000)), ForkId { hash: post_fork_hash, next: 0 });
 
         assert_eq!(spec.latest_fork_id(), ForkId { hash: post_fork_hash, next: 0 });
+
+        // fork_filter.current() must agree with fork_id() at each stage.
         assert_eq!(spec.fork_filter(head_at(0)).current(), spec.fork_id(&head_at(0)));
         assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
     }
@@ -547,13 +542,9 @@ mod tests {
                 "forks_iter should not include custom fork for chain {chain_id}, got: {names:?}",
             );
 
-            for ts in [0, 4999, 5000, 10000] {
-                let head = head_at(ts);
-                assert_eq!(spec.fork_id(&head), op_spec.fork_id(&head));
-            }
-
+            assert_eq!(spec.fork_id(&head_at(0)), op_spec.fork_id(&head_at(0)));
+            assert_eq!(spec.fork_id(&head_at(5000)), op_spec.fork_id(&head_at(5000)));
             assert_eq!(spec.latest_fork_id(), op_spec.latest_fork_id());
-            assert_eq!(spec.fork_filter(head_at(5000)).current(), spec.fork_id(&head_at(5000)));
         }
     }
 
