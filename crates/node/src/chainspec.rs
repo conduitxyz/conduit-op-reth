@@ -255,8 +255,9 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
             if exclude_state_override_from_fork_id(&op_chain_spec) {
                 eprintln!(
-                    "Excluding StateOverrideFork0 from fork ID calculation for chain ID {}",
-                    op_chain_spec.inner.genesis.config.chain_id
+                    "Excluding StateOverrideFork0 from fork ID calculation for chain ID {} at timestamp {}",
+                    op_chain_spec.inner.genesis.config.chain_id,
+                    raw.time
                 );
             } else {
                 op_chain_spec.inner.hardforks.insert(
