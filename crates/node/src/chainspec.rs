@@ -34,8 +34,6 @@ pub struct StateOverrideAccount {
 /// Configuration for the StateOverrideFork0 hardfork.
 #[derive(Debug, Clone)]
 pub struct StateOverrideFork0Config {
-    /// Timestamp at which StateOverrideFork0 activates.
-    pub time: u64,
     /// Account state updates to apply at activation, keyed by address.
     pub updates: HashMap<Address, StateOverrideAccount>,
 }
@@ -44,15 +42,17 @@ pub struct StateOverrideFork0Config {
 ///
 /// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list by default so they
 /// participate in fork IDs, fork filters, and `forks_iter()`. The `state_override_fork0` field
-/// carries the activation timestamp and associated state update data consumed by the block
-/// executor. Some legacy networks are excluded from registering the custom fork for fork ID
-/// compatibility.
+/// carries the associated state update data consumed by the block executor. The activation
+/// condition is tracked separately because some legacy networks are excluded from registering the
+/// custom fork for fork ID compatibility.
 #[derive(Debug, Clone)]
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
     pub inner: OpChainSpec,
     /// Configuration for StateOverrideFork0 (None if not configured).
     pub state_override_fork0: Option<StateOverrideFork0Config>,
+    /// Activation condition for StateOverrideFork0, tracked independently from fork IDs.
+    state_override_fork0_activation: ForkCondition,
 }
 
 impl EthChainSpec for ConduitOpChainSpec {
@@ -148,11 +148,7 @@ impl OpHardforks for ConduitOpChainSpec {
 impl ConduitOpHardforks for ConduitOpChainSpec {
     fn conduit_op_fork_activation(&self, fork: ConduitOpHardfork) -> ForkCondition {
         match fork {
-            ConduitOpHardfork::StateOverrideFork0 => self
-                .state_override_fork0
-                .as_ref()
-                .map(|config| ForkCondition::Timestamp(config.time))
-                .unwrap_or(ForkCondition::Never),
+            ConduitOpHardfork::StateOverrideFork0 => self.state_override_fork0_activation,
         }
     }
 }
@@ -224,6 +220,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             return Ok(Arc::new(ConduitOpChainSpec {
                 inner: (*op_chain_spec).clone(),
                 state_override_fork0: None,
+                state_override_fork0_activation: ForkCondition::Never,
             }));
         }
 
@@ -248,8 +245,13 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             );
         }
 
+        let state_override_fork0_activation = raw_fork0
+            .as_ref()
+            .map(|raw| ForkCondition::Timestamp(raw.time))
+            .unwrap_or(ForkCondition::Never);
+
         let state_override_fork0 = raw_fork0.map(|raw| {
-            let config = StateOverrideFork0Config { time: raw.time, updates: raw.updates };
+            let config = StateOverrideFork0Config { updates: raw.updates };
 
             if exclude_state_override_from_fork_id(&op_chain_spec) {
                 eprintln!(
@@ -259,14 +261,18 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             } else {
                 op_chain_spec.inner.hardforks.insert(
                     ConduitOpHardfork::StateOverrideFork0,
-                    ForkCondition::Timestamp(config.time),
+                    ForkCondition::Timestamp(raw.time),
                 );
             }
 
             config
         });
 
-        Ok(Arc::new(ConduitOpChainSpec { inner: op_chain_spec, state_override_fork0 }))
+        Ok(Arc::new(ConduitOpChainSpec {
+            inner: op_chain_spec,
+            state_override_fork0,
+            state_override_fork0_activation,
+        }))
     }
 }
 
@@ -391,7 +397,6 @@ mod tests {
         let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
 
         let config = spec.state_override_fork0.as_ref().expect("should have conduit config");
-        assert_eq!(config.time, 1234567890);
         assert_eq!(config.updates.len(), 2);
 
         assert_eq!(
