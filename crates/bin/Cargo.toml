@@ -45,6 +45,9 @@ otlp = [
     "reth-ethereum-cli/otlp",
     "reth-node-core/otlp",
 ]
+js-tracer = [
+    "conduit-op-reth-node/js-tracer",
+]
 
 [build-dependencies]
 vergen = { version = "9.1", features = ["build", "cargo", "emit_and_set"] }
