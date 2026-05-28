@@ -46,9 +46,9 @@ jobs:
             arch: linux-amd64
             max_parallelism: 16
           - platform: linux/arm64
-            runner: ubuntu-arm-24.04-64core-arm64
+            runner: ubuntu-arm-24.04-16core-arm64
             arch: linux-arm64
-            max_parallelism: 64
+            max_parallelism: 16
     steps:
       - name: Validate inputs
         env:
