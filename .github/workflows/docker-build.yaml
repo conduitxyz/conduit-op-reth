@@ -116,10 +116,9 @@ jobs:
           build-args: |
             BUILD_PROFILE=maxperf
             FEATURES=asm-keccak,jemalloc,keccak-cache-global,otlp,js-tracer
+          no-cache: true
           provenance: false
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=conduit-op-reth-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=conduit-op-reth-${{ matrix.arch }}
 
       - name: Verify Docker image runs
         env:
