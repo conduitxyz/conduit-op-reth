@@ -67,7 +67,7 @@ ARG BUILD_PROFILE=maxperf
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    cargo build --profile $BUILD_PROFILE --features="$FEATURES" --package=conduit-op-reth
+    cargo build --locked --profile $BUILD_PROFILE --features="$FEATURES" --package=conduit-op-reth
 
 #
 # Runtime container

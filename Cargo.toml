@@ -61,6 +61,14 @@ op-alloy-rpc-types-engine = "0.23"
 revm = "34"
 op-revm = "15"
 
+# NOTE: idna_adapter is pinned to 1.2.1 in Cargo.lock. The js-tracer feature pulls
+# boa_engine 0.21, which requires icu_normalizer ~2.0, while idna_adapter 1.2.2
+# (transitively via url -> idna, required by reth-optimism-node) requires
+# icu_normalizer ^2.2 — the two are mutually exclusive. 1.2.1 requires ^2.0, so a
+# single icu_normalizer 2.0.x satisfies both. `cargo update` will bump it back to
+# 1.2.2 and break the js-tracer build; re-pin with
+# `cargo update -p idna_adapter --precise 1.2.1`.
+
 # Test infrastructure
 reth-e2e-test-utils = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.4" }
 reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.4" }
