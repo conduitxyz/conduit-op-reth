@@ -2,9 +2,7 @@ use alloy_primitives::{Address, B64, B256, Bytes, b256, hex};
 use conduit_op_reth_node::chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser};
 use reth_cli::chainspec::ChainSpecParser;
 use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
-use reth_optimism_node::OpPayloadBuilderAttributes;
-use reth_payload_builder::EthPayloadBuilderAttributes;
-use reth_primitives_traits::WithEncoded;
+use reth_optimism_node::{OpPayloadAttributes, payload::OpPayloadAttrs};
 use std::sync::Arc;
 
 pub mod genesis_validation_test;
@@ -34,15 +32,14 @@ pub(crate) const BASE_GENESIS: &str =
     include_str!(concat!(env!("CARGO_WORKSPACE_DIR"), "/tests/fixtures/saigon-genesis.json"));
 
 /// Create OP payload attributes including the required L1 block info deposit tx.
-pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
-    timestamp: u64,
-) -> OpPayloadBuilderAttributes<T> {
+pub fn op_payload_attributes(timestamp: u64) -> OpPayloadAttrs {
     let attributes = alloy_rpc_types_engine::PayloadAttributes {
         timestamp,
         prev_randao: B256::ZERO,
         suggested_fee_recipient: Address::ZERO,
         withdrawals: Some(vec![]),
         parent_beacon_block_root: Some(B256::ZERO),
+        slot_number: None,
     };
 
     // L1 block info "set L1 block" deposit tx from OP mainnet block 124665056.
@@ -53,17 +50,15 @@ pub fn op_payload_attributes<T: alloy_eips::Decodable2718>(
         "7ef8f8a0683079df94aa5b9cf86687d739a60a9b4f0835e520ec4d664e2e415dca17a6df94deaddeaddeaddeaddeaddeaddeaddeaddead00019442000000000000000000000000000000000000158080830f424080b8a4440a5e200000146b000f79c500000000000000040000000066d052e700000000013ad8a3000000000000000000000000000000000000000000000000000000003ef1278700000000000000000000000000000000000000000000000000000000000000012fdf87b89884a61e74b322bbcf60386f543bfae7827725efaaf0ab1de2294a590000000000000000000000006887246668a3b87f54deb3b94ba47a6f63f32985"
     );
     let l1_info_raw = Bytes::from_static(&TX_SET_L1_BLOCK_OP_MAINNET_BLOCK_124665056);
-    let l1_info_tx = T::decode_2718(&mut l1_info_raw.as_ref())
-        .expect("failed to decode L1 block info deposit tx");
 
-    OpPayloadBuilderAttributes {
-        payload_attributes: EthPayloadBuilderAttributes::new(B256::ZERO, attributes),
-        transactions: vec![WithEncoded::new(l1_info_raw, l1_info_tx)],
-        no_tx_pool: false,
+    OpPayloadAttrs(OpPayloadAttributes {
+        payload_attributes: attributes,
+        transactions: Some(vec![l1_info_raw]),
+        no_tx_pool: Some(false),
         gas_limit: Some(30_000_000),
         eip_1559_params: Some(B64::ZERO),
         min_base_fee: Some(0),
-    }
+    })
 }
 
 /// Build genesis JSON with a `conduit.stateOverrideFork0` section injected.
@@ -132,8 +127,7 @@ macro_rules! launch_test_node {
         use reth_node_builder::{NodeBuilder, NodeHandle};
         use reth_tasks::Runtime as TaskRuntime;
 
-        let tasks = TaskRuntime::with_existing_handle(tokio::runtime::Handle::current())
-            .expect("failed to create task runtime");
+        let tasks = TaskRuntime::test();
         let node_config = crate::e2e::test_node_config($chain_spec);
         let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
             .testing_node(tasks.clone())

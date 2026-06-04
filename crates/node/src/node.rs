@@ -15,7 +15,7 @@ use reth_optimism_node::{
         OpNetworkBuilder, OpNodeTypes, OpPayloadBuilder, OpPoolBuilder,
     },
 };
-use reth_optimism_payload_builder::config::OpGasLimitConfig;
+use reth_optimism_payload_builder::{OpPayloadAttrs, config::OpGasLimitConfig};
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::eth::OpEthApiBuilder;
 use reth_primitives_traits::SealedHeader;
@@ -98,19 +98,17 @@ where
             self.args;
         ComponentsBuilder::default()
             .node_types::<N>()
+            .executor(ConduitOpExecutorBuilder::default().with_sdm_enabled(self.args.sdm_enabled))
             .pool(
                 OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)
-                    .with_supervisor(
-                        self.args.supervisor_http.clone(),
-                        self.args.supervisor_safety_level,
-                    ),
+                    .with_interop(self.args.interop_http.clone(), self.args.interop_safety_level),
             )
-            .executor(ConduitOpExecutorBuilder)
             .payload(BasicPayloadServiceBuilder::new(
                 OpPayloadBuilder::new(compute_pending_block)
                     .with_da_config(self.da_config.clone())
-                    .with_gas_limit_config(self.gas_limit_config.clone()),
+                    .with_gas_limit_config(self.gas_limit_config.clone())
+                    .with_sdm_enabled(self.args.sdm_enabled),
             ))
             .network(OpNetworkBuilder::new(disable_txpool_gossip, !discovery_v4))
             .consensus(OpConsensusBuilder::default())
@@ -122,6 +120,7 @@ where
             .with_sequencer_headers(self.args.sequencer_headers.clone())
             .with_da_config(self.da_config.clone())
             .with_gas_limit_config(self.gas_limit_config.clone())
+            .with_sdm_enabled(self.args.sdm_enabled)
             .with_enable_tx_conditional(self.args.enable_tx_conditional)
             .with_min_suggested_priority_fee(self.args.min_suggested_priority_fee)
             .with_historical_rpc(self.args.historical_rpc.clone())
@@ -147,7 +146,14 @@ where
         let inner = LocalPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()));
         // This allows us to run --dev mode. Fixed in upstream https://github.com/paradigmxyz/reth/pull/21855/changes
         move |parent: SealedHeader| {
-            let mut attrs: op_alloy_rpc_types_engine::OpPayloadAttributes = inner.build(&parent);
+            let mut attrs = op_alloy_rpc_types_engine::OpPayloadAttributes {
+                payload_attributes: inner.build(&parent),
+                transactions: None,
+                no_tx_pool: None,
+                gas_limit: None,
+                eip_1559_params: None,
+                min_base_fee: None,
+            };
 
             // Encode default OP EIP-1559 params: denominator=50, elasticity=6
             attrs.eip_1559_params = Some(alloy_primitives::B64::from_slice(&[
@@ -155,7 +161,7 @@ where
                 0, 0, 0, 6, // elasticity
             ]));
             attrs.min_base_fee = Some(0);
-            attrs
+            OpPayloadAttrs(attrs)
         }
     }
 }

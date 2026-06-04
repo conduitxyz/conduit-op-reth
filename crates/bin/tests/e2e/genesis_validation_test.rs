@@ -3,6 +3,7 @@ use alloy_rpc_types_engine::PayloadStatusEnum;
 use conduit_op_reth_node::node::ConduitOpNode;
 use reth_node_api::PayloadTypes;
 use reth_node_builder::NodeTypes;
+use reth_payload_primitives::BuiltPayload;
 
 /// Ensures the saigon genesis fixture (with lowercase `extradata`) is rejected by
 /// `engine_newPayload`.
@@ -23,7 +24,10 @@ async fn test_saigon_genesis_invalid_for_new_payload() -> eyre::Result<()> {
         .inner
         .add_ons_handle
         .beacon_engine_handle
-        .new_payload(Payload::block_to_payload(payload.block().clone()))
+        .new_payload(Payload::block_to_payload(
+            payload.block().clone(),
+            payload.block_access_list().cloned(),
+        ))
         .await?;
 
     match status.status {

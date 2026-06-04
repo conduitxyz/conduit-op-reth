@@ -9,38 +9,43 @@ use alloy_eips::Decodable2718;
 use alloy_evm::{
     Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
     block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFor, ExecutableTx,
-        OnStateHook, StateDB,
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFactory,
+        ExecutableTx, GasOutput, OnStateHook, StateDB,
     },
 };
 use alloy_op_evm::{
     OpBlockExecutionCtx, OpBlockExecutor, OpEvmFactory,
     block::{OpTxEnv, receipt_builder::OpReceiptBuilder},
+    post_exec::{PostExecEvm, PostExecExecutorExt},
 };
 use alloy_primitives::Bytes;
-use op_alloy_consensus::EIP1559ParamError;
-use op_alloy_rpc_types_engine::OpExecutionData;
+use op_alloy_consensus::{EIP1559ParamError, SDMGasEntry};
 use op_revm::OpSpecId;
 use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
-    InspectorFor,
+    execute::BlockBuilder,
 };
 use reth_node_builder::{BuilderContext, NodeTypes, components::ExecutorBuilder};
 use reth_optimism_evm::{
-    OpBlockAssembler, OpBlockExecutorFactory, OpEvmConfig, OpNextBlockEnvAttributes,
-    OpRethReceiptBuilder, OpTx,
+    ConfigurePostExecEvm, OpBlockAssembler, OpBlockExecutorFactory, OpEvmConfig,
+    OpNextBlockEnvAttributes, OpRethReceiptBuilder, OpTx, PostExecMode,
 };
 use reth_optimism_forks::OpHardforks;
+use reth_optimism_payload_builder::OpExecData;
 use reth_optimism_primitives::OpPrimitives;
 use reth_primitives_traits::{
     NodePrimitives, SealedBlock, SealedHeader, SignedTransaction, TxTy, WithEncoded,
 };
 use reth_storage_errors::any::AnyError;
 use revm::{
+    Inspector,
     context::Block,
     database::{DatabaseCommit, State},
 };
 use std::sync::Arc;
+
+type InnerBlockExecutorFactory =
+    OpBlockExecutorFactory<OpRethReceiptBuilder, Arc<ConduitOpChainSpec>, OpEvmFactory<OpTx>>;
 
 /// Custom block executor wrapping [`OpBlockExecutor`].
 ///
@@ -53,15 +58,18 @@ pub struct ConduitOpBlockExecutor<E, R: OpReceiptBuilder, Spec> {
 
 impl<E, R, Spec> BlockExecutor for ConduitOpBlockExecutor<E, R, Spec>
 where
-    E: Evm<
+    E: PostExecEvm<
             DB: Database + DatabaseCommit + StateDB,
             Tx: FromRecoveredTx<R::Transaction> + FromTxWithEncoded<R::Transaction> + OpTxEnv,
+            HaltReason: Send + 'static,
         >,
     R: OpReceiptBuilder<
-            Transaction: alloy_consensus::Transaction + alloy_eips::Encodable2718,
+            Transaction: alloy_consensus::Transaction
+                             + alloy_eips::Encodable2718
+                             + op_alloy_consensus::OpTransaction,
             Receipt: alloy_consensus::TxReceipt,
         >,
-    Spec: OpHardforks + Clone,
+    Spec: OpHardforks,
 {
     type Transaction = R::Transaction;
     type Receipt = R::Receipt;
@@ -92,7 +100,7 @@ where
         self.inner.execute_transaction_without_commit(tx)
     }
 
-    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
+    fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
         self.inner.commit_transaction(output)
     }
 
@@ -119,6 +127,48 @@ where
     }
 }
 
+impl<E, R, Spec> PostExecExecutorExt for ConduitOpBlockExecutor<E, R, Spec>
+where
+    E: Evm,
+    R: OpReceiptBuilder,
+    Spec: OpHardforks + Clone,
+{
+    fn take_post_exec_entries(&mut self) -> Vec<SDMGasEntry> {
+        self.inner.take_post_exec_entries()
+    }
+}
+
+impl BlockExecutorFactory for ConduitOpEvmConfig {
+    type EvmFactory = <InnerBlockExecutorFactory as BlockExecutorFactory>::EvmFactory;
+    type TxExecutionResult = <InnerBlockExecutorFactory as BlockExecutorFactory>::TxExecutionResult;
+    type ExecutionCtx<'a> = OpBlockExecutionCtx;
+    type Transaction = <InnerBlockExecutorFactory as BlockExecutorFactory>::Transaction;
+    type Receipt = <InnerBlockExecutorFactory as BlockExecutorFactory>::Receipt;
+    type Executor<'a, DB: StateDB, I: Inspector<<Self::EvmFactory as EvmFactory>::Context<DB>>> =
+        ConduitOpBlockExecutor<
+            <Self::EvmFactory as EvmFactory>::Evm<DB, I>,
+            &'a OpRethReceiptBuilder,
+            &'a Arc<ConduitOpChainSpec>,
+        >;
+
+    fn evm_factory(&self) -> &Self::EvmFactory {
+        self.inner.executor_factory.evm_factory()
+    }
+
+    fn create_executor<'a, DB, I>(
+        &'a self,
+        evm: <Self::EvmFactory as EvmFactory>::Evm<DB, I>,
+        ctx: Self::ExecutionCtx<'a>,
+    ) -> Self::Executor<'a, DB, I>
+    where
+        DB: StateDB,
+        I: Inspector<<Self::EvmFactory as EvmFactory>::Context<DB>>,
+    {
+        let inner = self.inner.executor_factory.create_executor(evm, ctx);
+        ConduitOpBlockExecutor { inner, chain_spec: self.chain_spec.clone() }
+    }
+}
+
 /// Custom EVM configuration wrapping [`OpEvmConfig`].
 ///
 /// Delegates all standard OP behavior to the inner config but overrides
@@ -136,18 +186,24 @@ impl ConduitOpEvmConfig {
         let inner = OpEvmConfig::new(chain_spec.clone(), OpRethReceiptBuilder::default());
         Self { inner, chain_spec }
     }
+
+    /// Configures the temporary SDM integration-test override.
+    #[must_use]
+    pub fn with_sdm_enabled(mut self, sdm_enabled: bool) -> Self {
+        self.inner = self.inner.with_sdm_enabled(sdm_enabled);
+        self
+    }
 }
 
 impl ConfigureEvm for ConduitOpEvmConfig {
     type Primitives = OpPrimitives;
     type Error = EIP1559ParamError;
     type NextBlockEnvCtx = OpNextBlockEnvAttributes;
-    type BlockExecutorFactory =
-        OpBlockExecutorFactory<OpRethReceiptBuilder, Arc<ConduitOpChainSpec>, OpEvmFactory<OpTx>>;
+    type BlockExecutorFactory = Self;
     type BlockAssembler = OpBlockAssembler<ConduitOpChainSpec>;
 
     fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
-        &self.inner.executor_factory
+        self
     }
 
     fn block_assembler(&self) -> &Self::BlockAssembler {
@@ -180,44 +236,64 @@ impl ConfigureEvm for ConduitOpEvmConfig {
     ) -> Result<OpBlockExecutionCtx, Self::Error> {
         self.inner.context_for_next_block(parent, attributes)
     }
+}
 
-    fn create_executor<'a, DB, I>(
+impl ConfigurePostExecEvm for ConduitOpEvmConfig {
+    fn post_exec_executor_for_block<'a, DB: Database>(
         &'a self,
-        evm: <OpEvmFactory<OpTx> as EvmFactory>::Evm<&'a mut State<DB>, I>,
-        ctx: OpBlockExecutionCtx,
-    ) -> impl BlockExecutorFor<'a, Self::BlockExecutorFactory, DB, I>
-    where
-        DB: alloy_evm::Database,
-        I: InspectorFor<Self, &'a mut State<DB>> + 'a,
-    {
-        let inner = OpBlockExecutor::new(
-            evm,
-            ctx,
-            self.inner.executor_factory.spec(),
-            self.inner.executor_factory.receipt_builder(),
+        db: &'a mut State<DB>,
+        block: &'a SealedBlock<<Self::Primitives as NodePrimitives>::Block>,
+        post_exec_mode: PostExecMode,
+    ) -> Result<
+        impl BlockExecutor<
+            Transaction = <Self::Primitives as NodePrimitives>::SignedTx,
+            Receipt = <Self::Primitives as NodePrimitives>::Receipt,
+        > + PostExecExecutorExt
+        + 'a,
+        Self::Error,
+    > {
+        let evm = self.evm_for_block(db, block.header())?;
+        let ctx = self.inner.context_for_block_with_post_exec_mode(block, Some(post_exec_mode));
+        Ok(ConfigureEvm::create_executor(self, evm, ctx))
+    }
+
+    fn post_exec_builder_for_next_block<'a, DB: Database + 'a>(
+        &'a self,
+        db: &'a mut State<DB>,
+        parent: &'a SealedHeader<<Self::Primitives as NodePrimitives>::BlockHeader>,
+        attributes: Self::NextBlockEnvCtx,
+        post_exec_mode: PostExecMode,
+    ) -> Result<
+        impl BlockBuilder<Primitives = Self::Primitives, Executor: PostExecExecutorExt> + 'a,
+        Self::Error,
+    > {
+        let evm_env = self.next_evm_env(parent, &attributes)?;
+        let evm = self.evm_with_env(db, evm_env);
+        let ctx = self.inner.context_for_next_block_with_post_exec_mode(
+            parent,
+            attributes,
+            post_exec_mode,
         );
-        ConduitOpBlockExecutor { inner, chain_spec: self.chain_spec.clone() }
+
+        Ok(self.create_block_builder(evm, parent, ctx))
     }
 }
 
-impl ConfigureEngineEvm<OpExecutionData> for ConduitOpEvmConfig {
-    fn evm_env_for_payload(
-        &self,
-        payload: &OpExecutionData,
-    ) -> Result<EvmEnvFor<Self>, Self::Error> {
-        self.inner.evm_env_for_payload(payload)
+impl ConfigureEngineEvm<OpExecData> for ConduitOpEvmConfig {
+    fn evm_env_for_payload(&self, payload: &OpExecData) -> Result<EvmEnvFor<Self>, Self::Error> {
+        self.inner.evm_env_for_payload(&payload.0)
     }
 
     fn context_for_payload<'a>(
         &self,
-        payload: &'a OpExecutionData,
+        payload: &'a OpExecData,
     ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
-        self.inner.context_for_payload(payload)
+        self.inner.context_for_payload(&payload.0)
     }
 
     fn tx_iterator_for_payload(
         &self,
-        payload: &OpExecutionData,
+        payload: &OpExecData,
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         let transactions = payload.payload.transactions().clone();
         let convert = |encoded: Bytes| {
@@ -237,7 +313,19 @@ impl ConfigureEngineEvm<OpExecutionData> for ConduitOpEvmConfig {
 /// custom state transitions into the node.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct ConduitOpExecutorBuilder;
+pub struct ConduitOpExecutorBuilder {
+    /// Whether SDM is explicitly enabled for integration tests.
+    pub sdm_enabled: bool,
+}
+
+impl ConduitOpExecutorBuilder {
+    /// Configure the temporary SDM integration-test override.
+    #[must_use]
+    pub const fn with_sdm_enabled(mut self, sdm_enabled: bool) -> Self {
+        self.sdm_enabled = sdm_enabled;
+        self
+    }
+}
 
 impl<Node> ExecutorBuilder<Node> for ConduitOpExecutorBuilder
 where
@@ -248,6 +336,6 @@ where
     type EVM = ConduitOpEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        Ok(ConduitOpEvmConfig::new(ctx.chain_spec()))
+        Ok(ConduitOpEvmConfig::new(ctx.chain_spec()).with_sdm_enabled(self.sdm_enabled))
     }
 }
