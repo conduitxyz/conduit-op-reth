@@ -93,6 +93,13 @@ alloy-op-evm = { git = "https://github.com/ethereum-optimism/optimism", tag = "o
 alloy-op-hardforks = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.0" }
 op-revm = { git = "https://github.com/ethereum-optimism/optimism", tag = "op-reth/v2.3.0" }
 
+# Keep debug test links under the Linux lld relocation limit after the reth v2.3
+# dependency graph expansion. Line tables preserve useful file/line backtraces while
+# avoiding full DWARF macro/type debug sections from large native dependencies.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [profile.maxperf]
 inherits = "release"
 lto = "fat"
