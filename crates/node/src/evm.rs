@@ -5,7 +5,6 @@
 
 use crate::{chainspec::ConduitOpChainSpec, state_override_fork0::ensure_state_override_fork0};
 use alloy_consensus::Header;
-use alloy_eips::Decodable2718;
 use alloy_evm::{
     Database, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
     block::{
@@ -18,7 +17,6 @@ use alloy_op_evm::{
     block::{OpTxEnv, receipt_builder::OpReceiptBuilder},
     post_exec::{PostExecEvm, PostExecExecutorExt, WarmingRefundEvent, WarmingState},
 };
-use alloy_primitives::Bytes;
 use op_alloy_consensus::{EIP1559ParamError, SDMGasEntry};
 use op_revm::OpSpecId;
 use reth_evm::{
@@ -33,10 +31,7 @@ use reth_optimism_evm::{
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_payload_builder::OpExecData;
 use reth_optimism_primitives::OpPrimitives;
-use reth_primitives_traits::{
-    NodePrimitives, SealedBlock, SealedHeader, SignedTransaction, TxTy, WithEncoded,
-};
-use reth_storage_errors::any::AnyError;
+use reth_primitives_traits::{NodePrimitives, SealedBlock, SealedHeader};
 use revm::{
     Inspector,
     context::Block,
@@ -317,15 +312,7 @@ impl ConfigureEngineEvm<OpExecData> for ConduitOpEvmConfig {
         &self,
         payload: &OpExecData,
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
-        let transactions = payload.payload.transactions().clone();
-        let convert = |encoded: Bytes| {
-            let tx =
-                TxTy::<OpPrimitives>::decode_2718_exact(encoded.as_ref()).map_err(AnyError::new)?;
-            let signer = tx.try_recover().map_err(AnyError::new)?;
-            Ok::<_, AnyError>(WithEncoded::new(encoded, tx.with_signer(signer)))
-        };
-
-        Ok((transactions, convert))
+        self.inner.tx_iterator_for_payload(&payload.0)
     }
 }
 
@@ -347,5 +334,78 @@ where
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         Ok(ConduitOpEvmConfig::new(ctx.chain_spec()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chainspec::ConduitOpChainSpecParser;
+    use reth_cli::chainspec::ChainSpecParser;
+
+    const KARST_GENESIS: &str = r#"{
+        "config": {
+            "chainId": 99999,
+            "homesteadBlock": 0,
+            "eip150Block": 0,
+            "eip155Block": 0,
+            "eip158Block": 0,
+            "byzantiumBlock": 0,
+            "constantinopleBlock": 0,
+            "petersburgBlock": 0,
+            "istanbulBlock": 0,
+            "muirGlacierBlock": 0,
+            "berlinBlock": 0,
+            "londonBlock": 0,
+            "shanghaiTime": 0,
+            "cancunTime": 0,
+            "pragueTime": 0,
+            "bedrockBlock": 0,
+            "regolithTime": 0,
+            "canyonTime": 0,
+            "ecotoneTime": 0,
+            "fjordTime": 0,
+            "graniteTime": 0,
+            "holoceneTime": 0,
+            "isthmusTime": 0,
+            "jovianTime": 0,
+            "karstTime": 1000
+        },
+        "difficulty": "0x0",
+        "gasLimit": "0x1c9c380",
+        "alloc": {}
+    }"#;
+
+    /// Regression test for Karst readiness: a genesis `karstTime` must flow through
+    /// [`ConduitOpChainSpec`] and [`ConduitOpEvmConfig`] into the `KARST` EVM spec
+    /// (Osaka semantics, including the EIP-7825 transaction gas cap that the tx pool
+    /// reads via `evm_env.cfg_env.tx_gas_limit_cap()`).
+    #[test]
+    fn karst_genesis_flows_through_wrapper() {
+        let dir = std::env::temp_dir().join("conduit-op-reth-karst-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("genesis.json");
+        std::fs::write(&path, KARST_GENESIS).unwrap();
+        let spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Hardfork activation is delegated through ConduitOpChainSpec.
+        assert!(!spec.is_karst_active_at_timestamp(999));
+        assert!(spec.is_karst_active_at_timestamp(1000));
+        assert!(spec.is_jovian_active_at_timestamp(999));
+
+        // ConduitOpEvmConfig delegates evm_env, which selects the KARST spec id.
+        let evm_config = ConduitOpEvmConfig::new(spec);
+        let pre = Header { timestamp: 999, gas_limit: 30_000_000, ..Default::default() };
+        let post = Header { timestamp: 1000, gas_limit: 30_000_000, ..Default::default() };
+        let env_pre = evm_config.evm_env(&pre).unwrap();
+        let env_post = evm_config.evm_env(&post).unwrap();
+        assert_eq!(env_pre.cfg_env.spec, OpSpecId::JOVIAN);
+        assert_eq!(env_post.cfg_env.spec, OpSpecId::KARST);
+
+        // The EIP-7825 tx gas cap (2^24) activates exactly at Karst.
+        use revm::context_interface::Cfg;
+        assert_eq!(env_pre.cfg_env.tx_gas_limit_cap(), u64::MAX);
+        assert_eq!(env_post.cfg_env.tx_gas_limit_cap(), 16_777_216);
     }
 }

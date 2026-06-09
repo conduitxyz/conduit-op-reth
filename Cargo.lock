@@ -2366,7 +2366,6 @@ dependencies = [
  "reth-optimism-primitives",
  "reth-optimism-rpc",
  "reth-primitives-traits",
- "reth-storage-errors",
  "revm",
  "serde",
  "serde_json",
