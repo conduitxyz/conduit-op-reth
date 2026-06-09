@@ -7,6 +7,7 @@ use conduit_op_reth_node::{
     chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser},
     evm::ConduitOpEvmConfig,
     node::ConduitOpNode,
+    proof_history,
 };
 use reth_db::DatabaseEnv;
 use reth_ethereum_cli::Cli;
@@ -40,11 +41,7 @@ fn main() {
             |builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
              rollup_args| async move {
                 info!(target: "reth::cli", "Launching conduit-op-reth node");
-                let handle = builder
-                    .node(ConduitOpNode::new(rollup_args))
-                    .launch_with_debug_capabilities()
-                    .await?;
-                handle.node_exit_future.await
+                proof_history::launch_node(builder, rollup_args).await
             },
         )
     {
