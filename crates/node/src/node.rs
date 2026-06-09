@@ -15,7 +15,10 @@ use reth_optimism_node::{
         OpNetworkBuilder, OpNodeTypes, OpPayloadBuilder, OpPoolBuilder,
     },
 };
-use reth_optimism_payload_builder::{OpPayloadAttrs, config::OpGasLimitConfig};
+use reth_optimism_payload_builder::{
+    OpPayloadAttrs,
+    config::{OpGasLimitConfig, SdmPostExecOptIn},
+};
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::eth::OpEthApiBuilder;
 use reth_primitives_traits::SealedHeader;
@@ -38,6 +41,8 @@ pub struct ConduitOpNode {
     /// Used to control the gas limit of the blocks produced by the OP builder (configured by the
     /// batcher via the `miner_` api).
     pub gas_limit_config: OpGasLimitConfig,
+    /// Local operator opt-in for SDM `PostExec` production.
+    pub sdm_post_exec_opt_in: SdmPostExecOptIn,
 }
 
 impl ConduitOpNode {
@@ -47,6 +52,7 @@ impl ConduitOpNode {
             args,
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
+            sdm_post_exec_opt_in: SdmPostExecOptIn::default(),
         }
     }
 
@@ -98,7 +104,7 @@ where
             self.args;
         ComponentsBuilder::default()
             .node_types::<N>()
-            .executor(ConduitOpExecutorBuilder::default().with_sdm_enabled(self.args.sdm_enabled))
+            .executor(ConduitOpExecutorBuilder)
             .pool(
                 OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)
@@ -108,7 +114,7 @@ where
                 OpPayloadBuilder::new(compute_pending_block)
                     .with_da_config(self.da_config.clone())
                     .with_gas_limit_config(self.gas_limit_config.clone())
-                    .with_sdm_enabled(self.args.sdm_enabled),
+                    .with_sdm_post_exec_opt_in(self.sdm_post_exec_opt_in.clone()),
             ))
             .network(OpNetworkBuilder::new(disable_txpool_gossip, !discovery_v4))
             .consensus(OpConsensusBuilder::default())
@@ -120,7 +126,7 @@ where
             .with_sequencer_headers(self.args.sequencer_headers.clone())
             .with_da_config(self.da_config.clone())
             .with_gas_limit_config(self.gas_limit_config.clone())
-            .with_sdm_enabled(self.args.sdm_enabled)
+            .with_sdm_post_exec_opt_in(self.sdm_post_exec_opt_in.clone())
             .with_enable_tx_conditional(self.args.enable_tx_conditional)
             .with_min_suggested_priority_fee(self.args.min_suggested_priority_fee)
             .with_historical_rpc(self.args.historical_rpc.clone())
