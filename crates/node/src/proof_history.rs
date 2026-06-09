@@ -1,5 +1,9 @@
 //! Node launcher with proof history support.
 
+// Keep this close to `reth_optimism_node::proof_history` from the pinned upstream op-reth tag.
+// Upstream's launcher is concrete over `OpChainSpec`/`OpNode`, so Conduit needs this local adapter
+// to preserve `ConduitOpChainSpec` and `ConduitOpNode` while reusing the same proof-history wiring.
+
 use crate::{chainspec::ConduitOpChainSpec, node::ConduitOpNode};
 use eyre::ErrReport;
 use futures_util::FutureExt;
