@@ -62,6 +62,7 @@ pub async fn launch_node(
     }
 }
 
+/// Installs the ExEx, RPC overrides, and metrics hook for proof history, then launches the node.
 async fn launch_with_proof_history<S>(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
     args: RollupArgs,
@@ -115,6 +116,7 @@ where
     handle.node_exit_future.await
 }
 
+/// Spawns a task that periodically reports metrics for the proofs DB.
 fn spawn_proofs_db_metrics<S>(
     executor: TaskExecutor,
     storage: Arc<S>,
