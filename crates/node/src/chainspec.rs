@@ -209,6 +209,17 @@ fn use_legacy_genesis_header_for_known_chains(op_chain_spec: &mut OpChainSpec) -
 #[non_exhaustive]
 pub struct ConduitOpChainSpecParser;
 
+impl From<OpChainSpec> for ConduitOpChainSpec {
+    /// Wraps a plain [`OpChainSpec`] without any `StateOverrideFork0` configuration.
+    fn from(inner: OpChainSpec) -> Self {
+        Self {
+            inner,
+            state_override_fork0: None,
+            state_override_fork0_activation: ForkCondition::Never,
+        }
+    }
+}
+
 impl ChainSpecParser for ConduitOpChainSpecParser {
     type ChainSpec = ConduitOpChainSpec;
 
@@ -217,11 +228,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
     fn parse(s: &str) -> eyre::Result<Arc<Self::ChainSpec>> {
         // Try known OP chain names first.
         if let Some(op_chain_spec) = generated_chain_value_parser(s) {
-            return Ok(Arc::new(ConduitOpChainSpec {
-                inner: (*op_chain_spec).clone(),
-                state_override_fork0: None,
-                state_override_fork0_activation: ForkCondition::Never,
-            }));
+            return Ok(Arc::new(ConduitOpChainSpec::from((*op_chain_spec).clone())));
         }
 
         // Parse genesis JSON.

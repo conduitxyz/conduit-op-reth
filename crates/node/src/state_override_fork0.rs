@@ -22,7 +22,7 @@ use tracing::info;
 ///
 /// Uses the OP Stack 2-second block time heuristic (matching Canyon's `ensure_create2_deployer`)
 /// to detect the transition block without requiring the parent block's timestamp.
-pub(crate) fn ensure_state_override_fork0<DB>(
+pub fn ensure_state_override_fork0<DB>(
     chain_spec: &impl ConduitOpHardforks,
     timestamp: u64,
     config: &StateOverrideFork0Config,

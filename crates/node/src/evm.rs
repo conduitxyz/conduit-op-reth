@@ -20,7 +20,8 @@ use alloy_op_evm::{
 use op_alloy_consensus::{EIP1559ParamError, SDMGasEntry};
 use op_revm::OpSpecId;
 use reth_evm::{
-    ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+    ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, EvmLimitParams, ExecutableTxIterator,
+    ExecutionCtxFor,
     execute::{BasicBlockBuilder, BlockBuilder},
 };
 use reth_node_builder::{BuilderContext, NodeTypes, components::ExecutorBuilder};
@@ -41,6 +42,21 @@ use std::sync::Arc;
 
 type InnerBlockExecutorFactory =
     OpBlockExecutorFactory<OpRethReceiptBuilder, Arc<ConduitOpChainSpec>, OpEvmFactory<OpTx>>;
+
+/// Maximum bytecode size for deployed contracts (614,400 bytes).
+pub const CONDUIT_MAX_CODE_SIZE: usize = 614_400;
+
+/// Maximum initcode size for transactions (1,228,800 bytes).
+pub const CONDUIT_MAX_INITCODE_SIZE: usize = 1_228_800;
+
+/// Returns the Conduit EVM limit parameters.
+pub const fn conduit_evm_limits() -> EvmLimitParams {
+    EvmLimitParams {
+        max_code_size: CONDUIT_MAX_CODE_SIZE,
+        max_initcode_size: CONDUIT_MAX_INITCODE_SIZE,
+        tx_gas_limit_cap: None,
+    }
+}
 
 /// Custom block executor wrapping [`OpBlockExecutor`].
 ///
@@ -189,13 +205,45 @@ impl BlockExecutorFactory for ConduitOpEvmConfig {
 pub struct ConduitOpEvmConfig {
     inner: OpEvmConfig<ConduitOpChainSpec, OpPrimitives>,
     chain_spec: Arc<ConduitOpChainSpec>,
+    limits: Option<EvmLimitParams>,
 }
 
 impl ConduitOpEvmConfig {
-    /// Creates a new [`ConduitOpEvmConfig`].
+    /// Creates a new [`ConduitOpEvmConfig`] with standard OP Stack defaults (no limit overrides).
     pub fn new(chain_spec: Arc<ConduitOpChainSpec>) -> Self {
+        Self::with_limits(chain_spec, None)
+    }
+
+    /// Creates a new [`ConduitOpEvmConfig`] with standard OP Stack defaults (no limit overrides).
+    pub fn optimism(chain_spec: Arc<ConduitOpChainSpec>) -> Self {
+        Self::with_limits(chain_spec, None)
+    }
+
+    /// Creates a new [`ConduitOpEvmConfig`] with Conduit's higher EVM limits.
+    pub fn conduit(chain_spec: Arc<ConduitOpChainSpec>) -> Self {
+        Self::with_limits(chain_spec, Some(conduit_evm_limits()))
+    }
+
+    /// Creates a new [`ConduitOpEvmConfig`] with the given optional EVM limit overrides.
+    pub fn with_limits(
+        chain_spec: Arc<ConduitOpChainSpec>,
+        limits: Option<EvmLimitParams>,
+    ) -> Self {
         let inner = OpEvmConfig::new(chain_spec.clone(), OpRethReceiptBuilder::default());
-        Self { inner, chain_spec }
+        Self { inner, chain_spec, limits }
+    }
+
+    /// Returns the receipt builder used by the block executor factory.
+    pub fn receipt_builder(&self) -> &OpRethReceiptBuilder {
+        self.inner.executor_factory.receipt_builder()
+    }
+
+    /// Applies configured EVM limits to the given environment, if any.
+    fn maybe_apply_limits(&self, env: EvmEnv<OpSpecId>) -> EvmEnv<OpSpecId> {
+        match self.limits {
+            Some(limits) => env.with_limits(limits),
+            None => env,
+        }
     }
 }
 
@@ -215,7 +263,7 @@ impl ConfigureEvm for ConduitOpEvmConfig {
     }
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv<OpSpecId>, Self::Error> {
-        self.inner.evm_env(header)
+        self.inner.evm_env(header).map(|env| self.maybe_apply_limits(env))
     }
 
     fn next_evm_env(
@@ -223,7 +271,7 @@ impl ConfigureEvm for ConduitOpEvmConfig {
         parent: &Header,
         attributes: &Self::NextBlockEnvCtx,
     ) -> Result<EvmEnv<OpSpecId>, Self::Error> {
-        self.inner.next_evm_env(parent, attributes)
+        self.inner.next_evm_env(parent, attributes).map(|env| self.maybe_apply_limits(env))
     }
 
     fn context_for_block(
@@ -298,7 +346,7 @@ impl ConfigurePostExecEvm for ConduitOpEvmConfig {
 
 impl ConfigureEngineEvm<OpExecData> for ConduitOpEvmConfig {
     fn evm_env_for_payload(&self, payload: &OpExecData) -> Result<EvmEnvFor<Self>, Self::Error> {
-        self.inner.evm_env_for_payload(&payload.0)
+        self.inner.evm_env_for_payload(&payload.0).map(|env| self.maybe_apply_limits(env))
     }
 
     fn context_for_payload<'a>(
@@ -319,10 +367,24 @@ impl ConfigureEngineEvm<OpExecData> for ConduitOpEvmConfig {
 /// Executor builder that produces [`ConduitOpEvmConfig`].
 ///
 /// Replaces [`OpExecutorBuilder`](reth_optimism_node::node::OpExecutorBuilder) to wire
-/// custom state transitions into the node.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ConduitOpExecutorBuilder;
+/// custom state transitions into the node, with optional EVM limit overrides.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct ConduitOpExecutorBuilder {
+    /// Optional EVM limit overrides applied to every EVM environment.
+    pub limits: Option<EvmLimitParams>,
+}
+
+impl ConduitOpExecutorBuilder {
+    /// Creates a builder with standard OP Stack defaults (no limit overrides).
+    pub const fn optimism() -> Self {
+        Self { limits: None }
+    }
+
+    /// Creates a builder with Conduit's higher EVM limits.
+    pub const fn conduit() -> Self {
+        Self { limits: Some(conduit_evm_limits()) }
+    }
+}
 
 impl<Node> ExecutorBuilder<Node> for ConduitOpExecutorBuilder
 where
@@ -333,7 +395,7 @@ where
     type EVM = ConduitOpEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        Ok(ConduitOpEvmConfig::new(ctx.chain_spec()))
+        Ok(ConduitOpEvmConfig::with_limits(ctx.chain_spec(), self.limits))
     }
 }
 
@@ -407,5 +469,31 @@ mod tests {
         use revm::context_interface::Cfg;
         assert_eq!(env_pre.cfg_env.tx_gas_limit_cap(), u64::MAX);
         assert_eq!(env_post.cfg_env.tx_gas_limit_cap(), 16_777_216);
+    }
+
+    /// Conduit EVM limits configured via [`ConduitOpEvmConfig::conduit`] must flow into
+    /// every EVM environment; the default constructors must leave OP Stack defaults intact.
+    #[test]
+    fn conduit_limits_flow_through_evm_env() {
+        let dir = std::env::temp_dir().join("conduit-op-reth-limits-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("genesis.json");
+        std::fs::write(&path, KARST_GENESIS).unwrap();
+        let spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        let header = Header { timestamp: 999, gas_limit: 30_000_000, ..Default::default() };
+
+        let env = ConduitOpEvmConfig::conduit(spec.clone()).evm_env(&header).unwrap();
+        assert_eq!(env.cfg_env.limit_contract_code_size, Some(CONDUIT_MAX_CODE_SIZE));
+        assert_eq!(env.cfg_env.limit_contract_initcode_size, Some(CONDUIT_MAX_INITCODE_SIZE));
+
+        for default_config in
+            [ConduitOpEvmConfig::new(spec.clone()), ConduitOpEvmConfig::optimism(spec)]
+        {
+            let env = default_config.evm_env(&header).unwrap();
+            assert_eq!(env.cfg_env.limit_contract_code_size, None);
+            assert_eq!(env.cfg_env.limit_contract_initcode_size, None);
+        }
     }
 }
