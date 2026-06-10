@@ -231,6 +231,13 @@ mod tests {
             db.basic_ref(Address::with_last_byte(0x42)).unwrap().is_none(),
             "should not re-apply one block after transition on a 1s chain"
         );
+
+        let mut db = InMemoryDB::default();
+        ensure_state_override_fork0(&spec, 999, &config, &mut db).unwrap();
+        assert!(
+            db.basic_ref(Address::with_last_byte(0x42)).unwrap().is_none(),
+            "should not apply before activation"
+        );
     }
 
     #[test]

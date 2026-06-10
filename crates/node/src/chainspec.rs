@@ -171,7 +171,7 @@ struct ConduitOpGenesisConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StateOverrideFork0Raw {
     time: u64,
     /// The chain's block time in seconds at fork activation. Defaults to the OP Stack
@@ -341,16 +341,19 @@ mod tests {
         "alloc": {}
     }"#;
 
-    fn parse_spec(json: &str) -> Arc<ConduitOpChainSpec> {
+    fn try_parse_spec(json: &str) -> eyre::Result<Arc<ConduitOpChainSpec>> {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("conduit-op-reth-test-{id}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("genesis.json");
         std::fs::write(&path, json).unwrap();
-        let spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap())
-            .expect("failed to parse genesis");
+        let result = ConduitOpChainSpecParser::parse(path.to_str().unwrap());
         std::fs::remove_dir_all(&dir).ok();
-        spec
+        result
+    }
+
+    fn parse_spec(json: &str) -> Arc<ConduitOpChainSpec> {
+        try_parse_spec(json).expect("failed to parse genesis")
     }
 
     fn with_conduit_fork(time: u64) -> String {
@@ -479,18 +482,27 @@ mod tests {
                 "updates": {}
             }
         });
-        let json = serde_json::to_string(&genesis).unwrap();
-
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("conduit-op-reth-test-{id}"));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("genesis.json");
-        std::fs::write(&path, json).unwrap();
-        let result = ConduitOpChainSpecParser::parse(path.to_str().unwrap());
-        std::fs::remove_dir_all(&dir).ok();
-
-        let err = result.expect_err("blockTimeAtFork of 0 should be rejected");
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap())
+            .expect_err("blockTimeAtFork of 0 should be rejected");
         assert!(err.to_string().contains("blockTimeAtFork"), "unexpected error: {err}");
+    }
+
+    /// A misspelled `blockTimeAtFork` (e.g. `blockTime`) must fail loudly at parse
+    /// time instead of silently falling back to the 2s default — on a 1s chain that
+    /// silent fallback would double-apply the override.
+    #[test]
+    fn parse_genesis_rejects_unknown_fork0_fields() {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        genesis["config"]["conduit"] = serde_json::json!({
+            "stateOverrideFork0": {
+                "time": 5000,
+                "blockTime": 1,
+                "updates": {}
+            }
+        });
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap())
+            .expect_err("unknown field should be rejected");
+        assert!(err.to_string().contains("blockTime"), "unexpected error: {err}");
     }
 
     #[test]

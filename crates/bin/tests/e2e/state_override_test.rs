@@ -202,6 +202,92 @@ async fn test_state_override_overwrites_deployed_contract() -> eyre::Result<()> 
     Ok(())
 }
 
+/// Regression test for the hardcoded 2s transition window on 1s block-time chains.
+///
+/// The override injects bytecode that does `SSTORE(slot1, 0x77)` along with a storage
+/// override `slot1 = 0xff`. A transaction in the transition block executes that SSTORE.
+/// With the old hardcoded 2s window on this 1s chain, the next block would re-apply the
+/// override and clobber the transaction's write back to 0xff; with `blockTimeAtFork: 1`
+/// the write must survive.
+#[tokio::test]
+async fn test_tx_write_in_transition_block_survives_next_block() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let sender_key: PrivateKeySigner =
+        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse().unwrap();
+    let contract_addr = address!("cAfE00000000000000000000000000000000cAfE");
+
+    // Runtime bytecode: PUSH1 0x77 PUSH1 0x01 SSTORE STOP.
+    let genesis_json = build_genesis_with_override(
+        FORK_ACTIVATION_TIMESTAMP,
+        serde_json::json!({
+            format!("{contract_addr}"): {
+                "code": "0x607760015500",
+                "storage": {
+                    "0x0000000000000000000000000000000000000000000000000000000000000001":
+                        "0x00000000000000000000000000000000000000000000000000000000000000ff"
+                }
+            }
+        }),
+        Some(serde_json::json!({
+            format!("{}", sender_key.address()): { "balance": PREFUND_BALANCE }
+        })),
+    );
+    let chain_spec = parse_chain_spec(&genesis_json);
+    let (_tasks, mut ctx) = launch_test_node!(chain_spec.clone());
+
+    // Block 1: fork not yet active.
+    advance!(ctx);
+
+    // Inject a tx that calls the contract; it will be included in block 2 (the
+    // transition block), executing SSTORE(slot1, 0x77) *after* the override runs.
+    let tx = TransactionRequest {
+        nonce: Some(0),
+        chain_id: Some(chain_spec.chain_id()),
+        gas: Some(100_000),
+        max_fee_per_gas: Some(1_000_000_000_000u128),
+        max_priority_fee_per_gas: Some(1_000_000_000u128),
+        to: Some(TxKind::Call(contract_addr)),
+        ..Default::default()
+    };
+    let signed = TransactionTestContext::sign_tx(sender_key, tx).await;
+    let raw_tx: Bytes = signed.encoded_2718().into();
+    let tx_hash = ctx.rpc.inject_tx(raw_tx).await?;
+
+    let start = std::time::Instant::now();
+    loop {
+        if ctx.rpc.inner.eth_api().transaction_by_hash(tx_hash).await?.is_some() {
+            break;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(2) {
+            eyre::bail!("tx {tx_hash} did not appear in txpool");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Block 2: override applies (slot1 = 0xff), then the tx overwrites slot1 = 0x77.
+    let payload = advance!(ctx);
+    let included = payload.block().body().transactions().any(|tx| *tx.tx_hash() == tx_hash);
+    assert!(included, "call tx should be included in the transition block");
+    let state = ctx.inner.provider.latest()?;
+    assert_eq!(
+        state.storage(contract_addr, STORAGE_SLOT_1)?,
+        Some(U256::from(0x77)),
+        "tx write should land on top of the override in the transition block"
+    );
+
+    // Block 3: the override must NOT re-apply; the tx's write survives.
+    advance!(ctx);
+    let state = ctx.inner.provider.latest()?;
+    assert_eq!(
+        state.storage(contract_addr, STORAGE_SLOT_1)?,
+        Some(U256::from(0x77)),
+        "override re-applied after the transition block, clobbering the tx write"
+    );
+
+    Ok(())
+}
+
 /// Places V1 bytecode (getValue() -> 42) via genesis alloc, overrides with V2
 /// (getValue() -> 99) at fork activation, and verifies via `eth_call`.
 #[tokio::test]
