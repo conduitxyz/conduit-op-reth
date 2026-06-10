@@ -495,6 +495,58 @@ mod tests {
         assert_eq!(conduit_spec.latest_fork_id(), ForkId { hash: base_hash, next: 0 });
     }
 
+    /// Upgrade tripwire: every observable [`EthChainSpec`] behavior of [`ConduitOpChainSpec`]
+    /// must match a plain upstream [`OpChainSpec`] built from the same genesis — even with a
+    /// conduit fork configured. If an upstream version bump adds or changes a chain-spec
+    /// override that this wrapper fails to delegate, this test fails.
+    #[test]
+    fn chainspec_observables_match_plain_op_chain_spec() {
+        let json = with_conduit_fork(5000);
+        let conduit_spec = parse_spec(&json);
+        let op_spec: OpChainSpec = {
+            let mut genesis: serde_json::Value = serde_json::from_str(&json).unwrap();
+            genesis["config"].as_object_mut().unwrap().remove("conduit");
+            let genesis: Genesis = serde_json::from_value(genesis).unwrap();
+            genesis.into()
+        };
+
+        assert_eq!(conduit_spec.chain(), op_spec.chain());
+        assert_eq!(conduit_spec.genesis_hash(), op_spec.genesis_hash());
+        assert_eq!(conduit_spec.genesis_header(), op_spec.genesis_header());
+        assert_eq!(conduit_spec.prune_delete_limit(), op_spec.prune_delete_limit());
+        assert_eq!(
+            conduit_spec.final_paris_total_difficulty(),
+            op_spec.final_paris_total_difficulty()
+        );
+        assert_eq!(conduit_spec.deposit_contract(), op_spec.deposit_contract());
+
+        let parent = Header {
+            number: 100,
+            timestamp: 4000,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            base_fee_per_gas: Some(1_000),
+            ..Default::default()
+        };
+        for ts in [0u64, 1, 4999, 5000, 5001, 1_000_000_000_000, u64::MAX / 2] {
+            assert_eq!(
+                conduit_spec.base_fee_params_at_timestamp(ts),
+                op_spec.base_fee_params_at_timestamp(ts),
+                "base_fee_params diverged at ts={ts}",
+            );
+            assert_eq!(
+                conduit_spec.blob_params_at_timestamp(ts),
+                op_spec.blob_params_at_timestamp(ts),
+                "blob_params diverged at ts={ts}",
+            );
+            assert_eq!(
+                conduit_spec.next_block_base_fee(&parent, ts),
+                op_spec.next_block_base_fee(&parent, ts),
+                "next_block_base_fee diverged at ts={ts}",
+            );
+        }
+    }
+
     #[test]
     fn fork_ids_with_custom_fork() {
         use alloy_eips::eip2124::ForkHash;

@@ -408,4 +408,45 @@ mod tests {
         assert_eq!(env_pre.cfg_env.tx_gas_limit_cap(), u64::MAX);
         assert_eq!(env_post.cfg_env.tx_gas_limit_cap(), 16_777_216);
     }
+
+    /// Upgrade tripwire: [`ConduitOpEvmConfig`] must produce an EVM environment identical to
+    /// a plain upstream [`OpEvmConfig`] built from the same genesis, at every timestamp —
+    /// including timestamps where the Conduit `StateOverrideFork0` is active. The custom fork
+    /// changes pre-execution state only; it must never leak into the EVM spec/cfg. If a new
+    /// upstream hardfork gates EVM behavior and this wrapper stops delegating it, or the
+    /// custom fork starts influencing the env, this test fails.
+    #[test]
+    fn evm_env_matches_plain_op_evm_config_at_all_timestamps() {
+        use alloy_genesis::Genesis;
+        use reth_optimism_chainspec::OpChainSpec;
+
+        // Conduit spec: karst at 1000 + StateOverrideFork0 at 5000.
+        let mut genesis_json: serde_json::Value = serde_json::from_str(KARST_GENESIS).unwrap();
+        genesis_json["config"]["conduit"] = serde_json::json!({
+            "stateOverrideFork0": { "time": 5000, "updates": {} }
+        });
+        let dir = std::env::temp_dir().join("conduit-op-reth-evm-equiv-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("genesis.json");
+        std::fs::write(&path, serde_json::to_string(&genesis_json).unwrap()).unwrap();
+        let conduit_spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Plain upstream spec from the same genesis without the conduit section.
+        let plain_genesis: Genesis = serde_json::from_str(KARST_GENESIS).unwrap();
+        let plain_spec: Arc<OpChainSpec> = Arc::new(plain_genesis.into());
+
+        let conduit_evm = ConduitOpEvmConfig::new(conduit_spec);
+        let plain_evm: reth_optimism_evm::OpEvmConfig<OpChainSpec, OpPrimitives> =
+            reth_optimism_evm::OpEvmConfig::new(plain_spec, OpRethReceiptBuilder::default());
+
+        // Sweep fork boundaries (karst at 1000, conduit fork at 5000) and far future.
+        for ts in [0u64, 1, 999, 1000, 1001, 4999, 5000, 5001, 1_000_000_000_000, u64::MAX / 2] {
+            let header = Header { timestamp: ts, gas_limit: 30_000_000, ..Default::default() };
+            let conduit_env = conduit_evm.evm_env(&header).unwrap();
+            let plain_env = plain_evm.evm_env(&header).unwrap();
+            assert_eq!(conduit_env.cfg_env, plain_env.cfg_env, "cfg_env diverged at ts={ts}");
+            assert_eq!(conduit_env.block_env, plain_env.block_env, "block_env diverged at ts={ts}");
+        }
+    }
 }
