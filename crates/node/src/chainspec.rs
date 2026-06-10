@@ -36,6 +36,10 @@ pub struct StateOverrideAccount {
 pub struct StateOverrideFork0Config {
     /// Account state updates to apply at activation, keyed by address.
     pub updates: HashMap<Address, StateOverrideAccount>,
+    /// The chain's block time in seconds at fork activation, used to detect the transition
+    /// block (the first block whose parent timestamp predates activation). Only needs to be
+    /// accurate for the blocks around activation; the chain's block time may change later.
+    pub block_time_at_fork: u64,
 }
 
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
@@ -167,9 +171,18 @@ struct ConduitOpGenesisConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StateOverrideFork0Raw {
     time: u64,
+    /// The chain's block time in seconds at fork activation. Defaults to the OP Stack
+    /// standard 2s.
+    #[serde(default = "default_block_time_at_fork")]
+    block_time_at_fork: u64,
     updates: HashMap<Address, StateOverrideAccount>,
+}
+
+const fn default_block_time_at_fork() -> u64 {
+    2
 }
 
 const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
@@ -252,13 +265,21 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             );
         }
 
+        if let Some(raw) = &raw_fork0 {
+            eyre::ensure!(
+                raw.block_time_at_fork > 0,
+                "stateOverrideFork0.blockTimeAtFork must be at least 1 second"
+            );
+        }
+
         let state_override_fork0_activation = raw_fork0
             .as_ref()
             .map(|raw| ForkCondition::Timestamp(raw.time))
             .unwrap_or(ForkCondition::Never);
 
         let state_override_fork0 = raw_fork0.map(|raw| {
-            let config = StateOverrideFork0Config { updates: raw.updates };
+            let config =
+                StateOverrideFork0Config { updates: raw.updates, block_time_at_fork: raw.block_time_at_fork };
 
             if exclude_state_override_from_fork_id(&op_chain_spec) {
                 eprintln!(
@@ -406,6 +427,10 @@ mod tests {
 
         let config = spec.state_override_fork0.as_ref().expect("should have conduit config");
         assert_eq!(config.updates.len(), 2);
+        assert_eq!(
+            config.block_time_at_fork, 2,
+            "blockTimeAtFork should default to 2s when omitted"
+        );
 
         assert_eq!(
             spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
@@ -426,6 +451,46 @@ mod tests {
         let slot_val: alloy_primitives::B256 =
             "0x00000000000000000000000000000000000000000000000000000000000000ff".parse().unwrap();
         assert_eq!(storage[&slot_key], slot_val);
+    }
+
+    #[test]
+    fn parse_genesis_with_explicit_block_time_at_fork() {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        genesis["config"]["conduit"] = serde_json::json!({
+            "stateOverrideFork0": {
+                "time": 5000,
+                "blockTimeAtFork": 1,
+                "updates": {
+                    "0x4200000000000000000000000000000000000042": { "code": "0x00" }
+                }
+            }
+        });
+        let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+        assert_eq!(spec.state_override_fork0.as_ref().unwrap().block_time_at_fork, 1);
+    }
+
+    #[test]
+    fn parse_genesis_rejects_zero_block_time_at_fork() {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        genesis["config"]["conduit"] = serde_json::json!({
+            "stateOverrideFork0": {
+                "time": 5000,
+                "blockTimeAtFork": 0,
+                "updates": {}
+            }
+        });
+        let json = serde_json::to_string(&genesis).unwrap();
+
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("conduit-op-reth-test-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("genesis.json");
+        std::fs::write(&path, json).unwrap();
+        let result = ConduitOpChainSpecParser::parse(path.to_str().unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+
+        let err = result.expect_err("blockTimeAtFork of 0 should be rejected");
+        assert!(err.to_string().contains("blockTimeAtFork"), "unexpected error: {err}");
     }
 
     #[test]
