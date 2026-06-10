@@ -85,6 +85,7 @@ serde_json = "1"
 eyre = "0.6"
 tempfile = "3"
 futures-util = "0.3.31"
+jsonrpsee = "0.26"
 
 # Unify op-alloy/alloy-op crates so crates.io transitive deps resolve to the same
 # git versions used by the ethereum-optimism/optimism repo.

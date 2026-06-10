@@ -6,6 +6,7 @@ use reth_optimism_node::{OpPayloadAttributes, payload::OpPayloadAttrs};
 use std::sync::Arc;
 
 pub mod genesis_validation_test;
+pub mod proofs_history_test;
 pub mod state_override_test;
 
 /// Solidity contract preamble: PUSH1 0x80 PUSH1 0x40 MSTORE.
@@ -155,3 +156,92 @@ macro_rules! advance {
 }
 
 pub(crate) use advance;
+
+/// In-process equivalent of `conduit-op-reth proofs init`: backfill the proofs storage from
+/// the current chain state. Mirrors the body of upstream's `InitCommand::run_init`.
+pub fn initialize_proofs_storage<F, S>(provider: &F, storage: S) -> eyre::Result<()>
+where
+    F: reth_provider::DatabaseProviderFactory + reth_provider::BlockNumReader,
+    F::Provider: reth_provider::DBProvider + reth_provider::StorageSettingsCache,
+    S: reth_optimism_trie::OpProofsStore,
+{
+    use reth_chainspec::ChainInfo;
+    use reth_optimism_trie::{InitializationJob, RethTrieStorageLayout};
+    use reth_provider::{DBProvider as _, StorageSettingsCache as _};
+
+    let ChainInfo { best_number, best_hash, .. } = provider.chain_info()?;
+    let db_provider = provider.database_provider_ro()?.disable_long_read_transaction_safety();
+    let trie_layout = if db_provider.cached_storage_settings().is_v2() {
+        RethTrieStorageLayout::Packed
+    } else {
+        RethTrieStorageLayout::Legacy
+    };
+    InitializationJob::new(storage, db_provider.into_tx(), trie_layout)
+        .run(best_number, best_hash)?;
+    Ok(())
+}
+
+/// Launch a test node with the proofs-history ExEx and RPC overrides installed,
+/// mirroring `conduit_op_reth_node::proof_history::launch_with_proof_history`.
+///
+/// The verification interval is 1: the ExEx replay engine re-executes every block with the
+/// node's EVM config. If proof replay ever stops using `ConduitOpEvmConfig`, re-executing a
+/// `StateOverrideFork0` transition block diverges and the ExEx (and the test) fails.
+macro_rules! launch_test_node_with_proofs {
+    ($chain_spec:expr, $proofs_dir:expr, $store_ty:ty) => {{
+        use futures_util::FutureExt as _;
+        use reth_e2e_test_utils::node::NodeTestContext;
+        use reth_node_builder::{FullNodeComponents as _, NodeBuilder, NodeHandle};
+        use reth_optimism_exex::OpProofsExEx;
+        use reth_optimism_rpc::{
+            debug::{DebugApiExt, DebugApiOverrideServer},
+            eth::proofs::{EthApiExt, EthApiOverrideServer},
+        };
+        use reth_optimism_trie::OpProofsStorage;
+        use reth_tasks::Runtime as TaskRuntime;
+        use std::sync::Arc;
+
+        let tasks = TaskRuntime::test();
+        let node_config = crate::e2e::test_node_config($chain_spec);
+
+        let mdbx = Arc::new(<$store_ty>::new($proofs_dir)?);
+        let storage: OpProofsStorage<Arc<$store_ty>> = mdbx.clone().into();
+        let storage_exex = storage.clone();
+        let storage_rpc = storage;
+
+        let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
+            .testing_node(tasks.clone())
+            .node(conduit_op_reth_node::node::ConduitOpNode::default())
+            .install_exex("proofs-history", async move |exex_context| {
+                // The CLI requires `proofs init` before boot; in-process we run the same
+                // initialization job against the freshly-written genesis state.
+                crate::e2e::initialize_proofs_storage(exex_context.provider(), mdbx)?;
+                Ok(OpProofsExEx::builder(exex_context, storage_exex)
+                    .with_verification_interval(1)
+                    .build()
+                    .run()
+                    .boxed())
+            })
+            .extend_rpc_modules(move |ctx| {
+                let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage_rpc.clone());
+                let debug_ext = DebugApiExt::new(
+                    ctx.node().provider().clone(),
+                    ctx.registry.eth_api().clone(),
+                    storage_rpc,
+                    ctx.node().task_executor().clone(),
+                    ctx.node().evm_config().clone(),
+                );
+                let eth_replaced = ctx.modules.replace_configured(api_ext.into_rpc())?;
+                let debug_replaced = ctx.modules.replace_configured(debug_ext.into_rpc())?;
+                assert!(eth_replaced && debug_replaced, "proofs RPC overrides must install");
+                Ok(())
+            })
+            .launch()
+            .await?;
+
+        let ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
+        (tasks, ctx)
+    }};
+}
+
+pub(crate) use launch_test_node_with_proofs;
