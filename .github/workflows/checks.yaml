@@ -127,6 +127,11 @@ jobs:
   test:
     name: Run tests
     runs-on: ubuntu-latest-4core
+    # Cold build of the workspace (incl. reth git deps) is ~13m; the default org job cap was
+    # cutting the run off before the test suite finished and before the rust-cache could save
+    # (a vicious cycle keeping every build cold). Raise the cap so one run completes and warms
+    # the cache; subsequent runs build in ~2-3m.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -141,4 +146,30 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libtss2-dev
 
       - name: Run tests
-        run: cargo test --workspace
+        # Skip the two heavy proofs-history e2e tests here. They each launch an in-process op-reth
+        # node and replay every block; run alongside the rest of the suite their accumulated memory
+        # OOM-kills the 16GB runner on a later test (reproducible even with a warm cache). They run
+        # on their own in the dedicated proofs-history-e2e job below.
+        run: cargo test --workspace -- --test-threads=1 --skip test_proofs_history_tracks_state_override_fork
+
+  proofs-history-e2e:
+    name: Proofs-history e2e (isolated)
+    runs-on: ubuntu-latest-4core
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libtss2-dev
+
+      - name: Run proofs-history e2e tests
+        # Run the heavy proofs-history e2e tests in isolation (own runner) so their in-process
+        # node memory doesn't accumulate with the rest of the suite and OOM the runner.
+        run: cargo test -p conduit-op-reth --test e2e_integration -- --test-threads=1 test_proofs_history_tracks_state_override_fork

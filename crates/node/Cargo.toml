@@ -21,6 +21,9 @@ reth-primitives-traits.workspace = true
 reth-engine-local.workspace = true
 reth-node-api.workspace = true
 reth-network-peers.workspace = true
+reth-db.workspace = true
+reth-db-api.workspace = true
+reth-tasks.workspace = true
 
 alloy-primitives.workspace = true
 alloy-genesis.workspace = true
@@ -38,8 +41,12 @@ op-revm.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+reth-optimism-exex = { workspace = true, features = ["metrics"] }
+reth-optimism-trie = { workspace = true, features = ["metrics"] }
 
 eyre.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
 
 [features]
 asm-keccak = [

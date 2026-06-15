@@ -14,14 +14,20 @@ conduit-op-reth-node.workspace = true
 
 alloy-primitives.workspace = true
 reth-ethereum-cli.workspace = true
+reth-optimism-chainspec.workspace = true
+reth-optimism-cli.workspace = true
 reth-optimism-consensus.workspace = true
 reth-optimism-node.workspace = true
 reth-node-builder.workspace = true
 reth-node-core.workspace = true
 reth-db.workspace = true
+reth-cli.workspace = true
+reth-cli-runner.workspace = true
 reth-cli-util.workspace = true
+reth-rpc-server-types.workspace = true
 
 clap.workspace = true
+eyre.workspace = true
 tracing.workspace = true
 
 [features]
@@ -55,7 +61,12 @@ vergen-git2 = "9.1"
 
 [dev-dependencies]
 conduit-op-reth-node.workspace = true
+futures-util.workspace = true
+jsonrpsee = { workspace = true, features = ["http-client"] }
 reth-cli.workspace = true
+reth-optimism-exex = { workspace = true, features = ["metrics"] }
+reth-optimism-rpc.workspace = true
+reth-optimism-trie = { workspace = true, features = ["metrics"] }
 reth-e2e-test-utils.workspace = true
 reth-node-api.workspace = true
 reth-node-builder = { workspace = true, features = ["test-utils"] }
