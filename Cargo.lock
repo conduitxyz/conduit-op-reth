@@ -2293,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "conduit-op-reth"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.5",
@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "conduit-op-reth-node"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips 2.0.5",
