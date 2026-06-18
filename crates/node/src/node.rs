@@ -168,9 +168,18 @@ where
         let inner = LocalPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()));
         // This allows us to run --dev mode. Fixed in upstream https://github.com/paradigmxyz/reth/pull/21855/changes
         move |parent: SealedHeader| {
+            // L1-info deposit system transaction, injected as tx[0] of every dev block.
+            // Without it op-reth's `extract_l1_info` has no L1 block info to parse, so
+            // `eth_getTransactionReceipt` fails with "invalid l1 block info transaction
+            // calldata in the L2 block". OP Mainnet transaction at index 0 in block
+            // 124665056; matches upstream `OpLocalPayloadAttributesBuilder`.
+            const TX_SET_L1_BLOCK: [u8; 251] = alloy_primitives::hex!(
+                "7ef8f8a0683079df94aa5b9cf86687d739a60a9b4f0835e520ec4d664e2e415dca17a6df94deaddeaddeaddeaddeaddeaddeaddeaddead00019442000000000000000000000000000000000000158080830f424080b8a4440a5e200000146b000f79c500000000000000040000000066d052e700000000013ad8a3000000000000000000000000000000000000000000000000000000003ef1278700000000000000000000000000000000000000000000000000000000000000012fdf87b89884a61e74b322bbcf60386f543bfae7827725efaaf0ab1de2294a590000000000000000000000006887246668a3b87f54deb3b94ba47a6f63f32985"
+            );
+
             let mut attrs = op_alloy_rpc_types_engine::OpPayloadAttributes {
                 payload_attributes: inner.build(&parent),
-                transactions: None,
+                transactions: Some(vec![TX_SET_L1_BLOCK.into()]),
                 no_tx_pool: None,
                 gas_limit: None,
                 eip_1559_params: None,
