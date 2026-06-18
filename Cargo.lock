@@ -2364,7 +2364,6 @@ dependencies = [
  "reth-cli",
  "reth-db",
  "reth-db-api",
- "reth-engine-local",
  "reth-evm",
  "reth-network-peers",
  "reth-node-api",
