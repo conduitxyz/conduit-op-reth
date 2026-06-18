@@ -2,11 +2,11 @@ use crate::{
     chainspec::ConduitOpChainSpec,
     evm::{ConduitOpExecutorBuilder, conduit_evm_limits},
 };
-use reth_engine_local::LocalPayloadAttributesBuilder;
+use reth_db::DatabaseEnv;
 use reth_evm::EvmLimitParams;
 use reth_node_api::{FullNodeComponents, PayloadAttributesBuilder, PayloadTypes};
 use reth_node_builder::{
-    DebugNode, Node, NodeAdapter, NodeComponentsBuilder, NodeTypes,
+    DebugNode, Node, NodeAdapter, NodeComponentsBuilder, NodeTypes, RethFullAdapter,
     components::{BasicPayloadServiceBuilder, ComponentsBuilder},
     node::FullNodeTypes,
     rpc::BasicEngineValidatorBuilder,
@@ -16,7 +16,7 @@ use reth_optimism_node::{
     args::RollupArgs,
     node::{
         OpAddOns, OpAddOnsBuilder, OpConsensusBuilder, OpEngineValidatorBuilder, OpFullNodeTypes,
-        OpNetworkBuilder, OpNodeTypes, OpPayloadBuilder, OpPoolBuilder,
+        OpNetworkBuilder, OpNode, OpNodeTypes, OpPayloadBuilder, OpPoolBuilder,
     },
 };
 use reth_optimism_payload_builder::{
@@ -26,7 +26,8 @@ use reth_optimism_payload_builder::{
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::eth::OpEthApiBuilder;
 use reth_primitives_traits::SealedHeader;
-use std::sync::Arc;
+
+type OpLocalNodeAdapter = NodeAdapter<RethFullAdapter<DatabaseEnv, OpNode>>;
 
 /// Type configuration for the ConduitOp OP Stack node.
 #[derive(Debug, Default, Clone)]
@@ -165,34 +166,43 @@ where
     fn local_payload_attributes_builder(
         chain_spec: &Self::ChainSpec,
     ) -> impl PayloadAttributesBuilder<<Self::Payload as PayloadTypes>::PayloadAttributes> {
-        let inner = LocalPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()));
-        // This allows us to run --dev mode. Fixed in upstream https://github.com/paradigmxyz/reth/pull/21855/changes
-        move |parent: SealedHeader| {
-            // L1-info deposit system transaction, injected as tx[0] of every dev block.
-            // Without it op-reth's `extract_l1_info` has no L1 block info to parse, so
-            // `eth_getTransactionReceipt` fails with "invalid l1 block info transaction
-            // calldata in the L2 block". OP Mainnet transaction at index 0 in block
-            // 124665056; matches upstream `OpLocalPayloadAttributesBuilder`.
-            const TX_SET_L1_BLOCK: [u8; 251] = alloy_primitives::hex!(
-                "7ef8f8a0683079df94aa5b9cf86687d739a60a9b4f0835e520ec4d664e2e415dca17a6df94deaddeaddeaddeaddeaddeaddeaddeaddead00019442000000000000000000000000000000000000158080830f424080b8a4440a5e200000146b000f79c500000000000000040000000066d052e700000000013ad8a3000000000000000000000000000000000000000000000000000000003ef1278700000000000000000000000000000000000000000000000000000000000000012fdf87b89884a61e74b322bbcf60386f543bfae7827725efaaf0ab1de2294a590000000000000000000000006887246668a3b87f54deb3b94ba47a6f63f32985"
-            );
+        // Reuse upstream OP's dev-mode payload attrs builder, adapting from Conduit's wrapper
+        // chain spec to the inner OP chain spec so L1-info tx and OP_DEV_* handling stay aligned.
+        let inner = <OpNode as DebugNode<OpLocalNodeAdapter>>::local_payload_attributes_builder(
+            &chain_spec.inner,
+        );
 
-            let mut attrs = op_alloy_rpc_types_engine::OpPayloadAttributes {
-                payload_attributes: inner.build(&parent),
-                transactions: Some(vec![TX_SET_L1_BLOCK.into()]),
-                no_tx_pool: None,
-                gas_limit: None,
-                eip_1559_params: None,
-                min_base_fee: None,
-            };
+        move |parent: SealedHeader| inner.build(&parent)
+    }
+}
 
-            // Encode default OP EIP-1559 params: denominator=50, elasticity=6
-            attrs.eip_1559_params = Some(alloy_primitives::B64::from_slice(&[
-                0, 0, 0, 50, // denominator
-                0, 0, 0, 6, // elasticity
-            ]));
-            attrs.min_base_fee = Some(0);
-            OpPayloadAttrs(attrs)
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_chainspec::EthChainSpec;
+    use reth_cli::chainspec::ChainSpecParser;
+    use reth_db::DatabaseEnv;
+    use reth_node_builder::{DebugNode, NodeAdapter, RethFullAdapter};
+
+    type TestNode = NodeAdapter<RethFullAdapter<DatabaseEnv, ConduitOpNode>>;
+
+    fn build_local_payload_attrs() -> OpPayloadAttrs {
+        let chain_spec = crate::chainspec::ConduitOpChainSpecParser::parse("dev").unwrap();
+        let builder =
+            <ConduitOpNode as DebugNode<TestNode>>::local_payload_attributes_builder(&chain_spec);
+        let parent = SealedHeader::seal_slow(chain_spec.genesis_header().clone());
+
+        builder.build(&parent)
+    }
+
+    #[test]
+    fn local_payload_attrs_include_op_system_tx() {
+        let attrs = build_local_payload_attrs().0;
+        let txs = attrs.transactions.expect("dev attrs must include L1-info system tx");
+
+        assert_eq!(txs.len(), 1);
+        assert_eq!(txs[0].len(), 251);
+        assert_eq!(txs[0][0], 0x7e);
+        assert_eq!(attrs.payload_attributes.slot_number, None);
     }
 }

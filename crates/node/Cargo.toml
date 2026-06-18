@@ -18,7 +18,6 @@ reth-cli.workspace = true
 reth-evm.workspace = true
 reth-node-builder.workspace = true
 reth-primitives-traits.workspace = true
-reth-engine-local.workspace = true
 reth-node-api.workspace = true
 reth-network-peers.workspace = true
 reth-db.workspace = true
