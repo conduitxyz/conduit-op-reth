@@ -120,7 +120,7 @@ where
             self.args;
         ComponentsBuilder::default()
             .node_types::<N>()
-            .executor(ConduitOpExecutorBuilder { limits: self.evm_limits })
+            .executor(ConduitOpExecutorBuilder { limits: self.evm_limits, ..Default::default() })
             .pool(
                 OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)
