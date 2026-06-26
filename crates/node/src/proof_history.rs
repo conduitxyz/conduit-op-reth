@@ -6,16 +6,22 @@
 
 use crate::{
     chainspec::ConduitOpChainSpec,
-    flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt},
+    evm::ConduitOpEvmConfig,
+    flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     node::ConduitOpNode,
 };
 use eyre::ErrReport;
 use futures_util::FutureExt;
+use jsonrpsee::types::ErrorObject;
 use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::DatabaseMetrics;
-use reth_node_builder::{FullNodeComponents, NodeBuilder, WithLaunchContext};
+use reth_node_builder::{
+    FullNodeComponents, FullNodeTypes, NodeAdapter, NodeBuilder, NodeBuilderWithComponents,
+    NodeComponents, NodeComponentsBuilder, NodeTypes, WithLaunchContext, rpc::RethRpcAddOns,
+};
 use reth_optimism_exex::OpProofsExEx;
 use reth_optimism_node::args::{ProofsStorageVersion, RollupArgs};
+use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::{
     debug::{DebugApiExt, DebugApiOverrideServer},
     eth::proofs::{EthApiExt, EthApiOverrideServer},
@@ -24,6 +30,7 @@ use reth_optimism_trie::{
     OpProofsStorage, OpProofsStore,
     db::{MdbxProofsStorage, MdbxProofsStorageV2},
 };
+use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -37,19 +44,11 @@ pub async fn launch_node(
 ) -> eyre::Result<(), ErrReport> {
     if !args.proofs_history {
         let flashblocks_enabled = args.flashblocks_url.is_some();
-        let handle = builder
-            .node(ConduitOpNode::new(args))
-            .extend_rpc_modules(move |ctx| {
-                if flashblocks_enabled {
-                    info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
-                    let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
-                    ctx.modules.add_or_replace_configured(ext.into_rpc())?;
-                    info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
-                }
-                Ok(())
-            })
-            .launch_with_debug_capabilities()
-            .await?;
+        let builder = install_flashblocks_call_overrides(
+            builder.node(ConduitOpNode::new(args)),
+            flashblocks_enabled,
+        );
+        let handle = builder.launch_with_debug_capabilities().await?;
         return handle.node_exit_future.await;
     }
 
@@ -94,17 +93,11 @@ where
         args.clone();
     let flashblocks_enabled = args.flashblocks_url.is_some();
 
+    let builder = install_flashblocks_call_overrides(
+        builder.node(ConduitOpNode::new(args)),
+        flashblocks_enabled,
+    );
     let handle = builder
-        .node(ConduitOpNode::new(args))
-        .extend_rpc_modules(move |ctx| {
-            if flashblocks_enabled {
-                info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
-                let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
-                ctx.modules.add_or_replace_configured(ext.into_rpc())?;
-                info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
-            }
-            Ok(())
-        })
         .on_node_started(move |node| {
             spawn_proofs_db_metrics(
                 node.task_executor,
@@ -140,6 +133,38 @@ where
         .await?;
 
     handle.node_exit_future.await
+}
+
+/// Installs the flashblocks pending-state RPC overrides (`eth_call`, `eth_estimateGas`,
+/// `eth_simulateV1`) when `flashblocks_enabled`, otherwise returns the builder unchanged.
+///
+/// Generic over the builder's node types / components / add-ons so both the no-proofs and
+/// proofs-history launch paths share the exact same wiring. The caller is responsible for
+/// calling `.launch*()` on the returned builder.
+fn install_flashblocks_call_overrides<T, CB, AO>(
+    builder: WithLaunchContext<NodeBuilderWithComponents<T, CB, AO>>,
+    flashblocks_enabled: bool,
+) -> WithLaunchContext<NodeBuilderWithComponents<T, CB, AO>>
+where
+    T: FullNodeTypes,
+    T::Types: NodeTypes<Primitives = OpPrimitives, ChainSpec = ConduitOpChainSpec>,
+    CB: NodeComponentsBuilder<T>,
+    CB::Components: NodeComponents<T, Evm = ConduitOpEvmConfig>,
+    AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>,
+    AO::EthApi: FullEthApi + PendingFlashblockState + Clone + Send + Sync + 'static,
+    ErrorObject<'static>: From<<AO::EthApi as EthApiTypes>::Error>,
+{
+    if !flashblocks_enabled {
+        return builder;
+    }
+
+    builder.extend_rpc_modules(move |ctx| {
+        info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
+        let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
+        ctx.modules.add_or_replace_configured(ext.into_rpc())?;
+        info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+        Ok(())
+    })
 }
 
 /// Spawns a task that periodically reports metrics for the proofs DB.
