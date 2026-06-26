@@ -4,7 +4,11 @@
 // Upstream's launcher is concrete over `OpChainSpec`/`OpNode`, so Conduit needs this local adapter
 // to preserve `ConduitOpChainSpec` and `ConduitOpNode` while reusing the same proof-history wiring.
 
-use crate::{chainspec::ConduitOpChainSpec, node::ConduitOpNode};
+use crate::{
+    chainspec::ConduitOpChainSpec,
+    flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt},
+    node::ConduitOpNode,
+};
 use eyre::ErrReport;
 use futures_util::FutureExt;
 use reth_db::DatabaseEnv;
@@ -32,8 +36,20 @@ pub async fn launch_node(
     args: RollupArgs,
 ) -> eyre::Result<(), ErrReport> {
     if !args.proofs_history {
-        let handle =
-            builder.node(ConduitOpNode::new(args)).launch_with_debug_capabilities().await?;
+        let flashblocks_enabled = args.flashblocks_url.is_some();
+        let handle = builder
+            .node(ConduitOpNode::new(args))
+            .extend_rpc_modules(move |ctx| {
+                if flashblocks_enabled {
+                    info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
+                    let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
+                    ctx.modules.add_or_replace_configured(ext.into_rpc())?;
+                    info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+                }
+                Ok(())
+            })
+            .launch_with_debug_capabilities()
+            .await?;
         return handle.node_exit_future.await;
     }
 
@@ -76,9 +92,19 @@ where
 
     let RollupArgs { proofs_history_window, proofs_history_verification_interval, .. } =
         args.clone();
+    let flashblocks_enabled = args.flashblocks_url.is_some();
 
     let handle = builder
         .node(ConduitOpNode::new(args))
+        .extend_rpc_modules(move |ctx| {
+            if flashblocks_enabled {
+                info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
+                let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
+                ctx.modules.add_or_replace_configured(ext.into_rpc())?;
+                info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+            }
+            Ok(())
+        })
         .on_node_started(move |node| {
             spawn_proofs_db_metrics(
                 node.task_executor,
