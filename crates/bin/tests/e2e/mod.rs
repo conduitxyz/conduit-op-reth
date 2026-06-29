@@ -182,7 +182,7 @@ where
 }
 
 /// Launch a test node with the proofs-history ExEx and RPC overrides installed,
-/// mirroring `conduit_op_reth_node::proof_history::launch_with_proof_history`.
+/// mirroring `conduit_op_reth_node::launcher::launch_with_proof_history`.
 ///
 /// The verification interval is 1: the ExEx replay engine re-executes every block with the
 /// node's EVM config. If proof replay ever stops using `ConduitOpEvmConfig`, re-executing a
