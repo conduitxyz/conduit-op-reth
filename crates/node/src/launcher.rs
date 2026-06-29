@@ -1,4 +1,5 @@
-//! Node launcher with proof history support.
+//! Node launcher: wires the proof-history ExEx/RPC overrides and the flashblocks
+//! pending-state RPC overrides onto the Conduit OP-Reth node.
 
 // Keep this close to `reth_optimism_node::proof_history` from the pinned upstream op-reth tag.
 // Upstream's launcher is concrete over `OpChainSpec`/`OpNode`, so Conduit needs this local adapter
