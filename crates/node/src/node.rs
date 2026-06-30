@@ -124,7 +124,11 @@ where
             .pool(
                 OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)
-                    .with_interop(self.args.interop_http.clone(), self.args.interop_safety_level),
+                    .with_interop(
+                        self.args.interop_http.clone(),
+                        self.args.interop_min_responses,
+                        self.args.interop_safety_level,
+                    ),
             )
             .payload(BasicPayloadServiceBuilder::new(
                 OpPayloadBuilder::new(compute_pending_block)
