@@ -39,8 +39,8 @@ where
     // If the fork is active at the current timestamp but was not active at the previous block
     // timestamp (heuristically, OP Stack block time is 2s), then we are at the transition block.
     // TODO(rezmah): review whether 2s heuristic is appropriate for all target chains
-    if !chain_spec.is_state_override_fork0_active_at_timestamp(timestamp)
-        || chain_spec.is_state_override_fork0_active_at_timestamp(timestamp.saturating_sub(2))
+    if !chain_spec.is_state_override_fork0_active_at_timestamp(timestamp) ||
+        chain_spec.is_state_override_fork0_active_at_timestamp(timestamp.saturating_sub(2))
     {
         return Ok(());
     }

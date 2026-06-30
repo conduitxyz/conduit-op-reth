@@ -85,8 +85,10 @@ mod tests {
                 "backfill",
                 "--proofs-history.storage-path",
                 "/tmp/p",
-                "--proofs-history.target-earliest-block",
+                "--proofs-history.window",
                 "100",
+                "--proofs-history.storage-version",
+                "v2",
                 "--proofs-history.use-snapshot",
             ],
             &[

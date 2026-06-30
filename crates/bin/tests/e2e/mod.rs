@@ -71,10 +71,12 @@ pub fn build_genesis_with_override(
     let mut genesis: serde_json::Value =
         serde_json::from_str(BASE_GENESIS).expect("failed to parse base genesis");
 
-    // Jovian extra data: 17 bytes (version=1, zeros for eip1559 params/min base fee).
+    // Jovian extra data: 17 bytes (version=1, denominator=250, elasticity=6, min base fee=0).
+    // Because this fixture activates Jovian at genesis, the genesis header must carry valid
+    // Jovian base-fee params for the first child block to validate against its parent.
     let obj = genesis.as_object_mut().unwrap();
     obj.remove("extradata");
-    obj.insert("extraData".to_string(), serde_json::json!("0x0100000000000000000000000000000000"));
+    obj.insert("extraData".to_string(), serde_json::json!("0x01000000fa000000060000000000000000"));
 
     genesis["config"]["conduit"] = serde_json::json!({
         "stateOverrideFork0": {

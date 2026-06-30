@@ -57,6 +57,7 @@ fn proofs_init_works_against_conduit_datadir() {
             proofs,
             "--proofs-history.storage-version",
             version,
+            "--proofs-history.skip-backfill",
         ];
 
         let out = run_cli(&args);
