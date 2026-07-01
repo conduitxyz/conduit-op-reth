@@ -9,11 +9,11 @@ use alloy_evm::{
     Database, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFactory,
-        ExecutableTx, GasOutput, OnStateHook, StateDB,
+        ExecutableTx, GasOutput, StateDB,
     },
 };
 use alloy_op_evm::{
-    OpBlockExecutionCtx, OpBlockExecutor, OpEvmFactory,
+    OpBlockExecutionCtx, OpBlockExecutor, OpEvmFactory, PreRefundGasUsed,
     block::{OpTxEnv, receipt_builder::OpReceiptBuilder},
     post_exec::{PostExecEvm, PostExecExecutorExt, WarmingRefundEvent, WarmingState},
 };
@@ -119,10 +119,6 @@ where
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
         self.inner.finish()
-    }
-
-    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
-        self.inner.set_state_hook(hook)
     }
 
     fn evm_mut(&mut self) -> &mut Self::Evm {
@@ -239,9 +235,16 @@ impl ConduitOpEvmConfig {
     }
 
     /// Applies configured EVM limits to the given environment, if any.
-    fn maybe_apply_limits(&self, env: EvmEnv<OpSpecId>) -> EvmEnv<OpSpecId> {
+    fn maybe_apply_limits(&self, mut env: EvmEnv<OpSpecId>) -> EvmEnv<OpSpecId> {
         match self.limits {
-            Some(limits) => env.with_limits(limits),
+            Some(limits) => {
+                env.cfg_env.limit_contract_code_size = Some(limits.max_code_size);
+                env.cfg_env.limit_contract_initcode_size = Some(limits.max_initcode_size);
+                if let Some(tx_gas_limit_cap) = limits.tx_gas_limit_cap {
+                    env.cfg_env.tx_gas_limit_cap = Some(tx_gas_limit_cap);
+                }
+                env
+            }
             None => env,
         }
     }
@@ -321,6 +324,7 @@ impl ConfigurePostExecEvm for ConduitOpEvmConfig {
             Executor: PostExecExecutorExt
                           + BlockExecutor<
                 Evm: alloy_evm::Evm<DB: core::ops::DerefMut<Target = State<DB>>>,
+                Result: PreRefundGasUsed,
             >,
         > + 'a,
         Self::Error,
@@ -482,16 +486,23 @@ mod tests {
         let spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap()).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
-        let header = Header { timestamp: 999, gas_limit: 30_000_000, ..Default::default() };
+        let pre = Header { timestamp: 999, gas_limit: 30_000_000, ..Default::default() };
+        let post = Header { timestamp: 1000, gas_limit: 30_000_000, ..Default::default() };
 
-        let env = ConduitOpEvmConfig::conduit(spec.clone()).evm_env(&header).unwrap();
-        assert_eq!(env.cfg_env.limit_contract_code_size, Some(CONDUIT_MAX_CODE_SIZE));
-        assert_eq!(env.cfg_env.limit_contract_initcode_size, Some(CONDUIT_MAX_INITCODE_SIZE));
+        let conduit_config = ConduitOpEvmConfig::conduit(spec.clone());
+        let env_pre = conduit_config.evm_env(&pre).unwrap();
+        assert_eq!(env_pre.cfg_env.limit_contract_code_size, Some(CONDUIT_MAX_CODE_SIZE));
+        assert_eq!(env_pre.cfg_env.limit_contract_initcode_size, Some(CONDUIT_MAX_INITCODE_SIZE));
+
+        let env_post = conduit_config.evm_env(&post).unwrap();
+        assert_eq!(env_post.cfg_env.limit_contract_code_size, Some(CONDUIT_MAX_CODE_SIZE));
+        assert_eq!(env_post.cfg_env.limit_contract_initcode_size, Some(CONDUIT_MAX_INITCODE_SIZE));
+        assert_eq!(env_post.cfg_env.tx_gas_limit_cap, Some(16_777_216));
 
         for default_config in
             [ConduitOpEvmConfig::new(spec.clone()), ConduitOpEvmConfig::optimism(spec)]
         {
-            let env = default_config.evm_env(&header).unwrap();
+            let env = default_config.evm_env(&pre).unwrap();
             assert_eq!(env.cfg_env.limit_contract_code_size, None);
             assert_eq!(env.cfg_env.limit_contract_initcode_size, None);
         }

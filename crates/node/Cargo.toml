@@ -13,6 +13,7 @@ reth-optimism-primitives.workspace = true
 reth-optimism-node.workspace = true
 reth-optimism-payload-builder.workspace = true
 reth-optimism-rpc.workspace = true
+reth-optimism-txpool.workspace = true
 reth-chainspec.workspace = true
 reth-cli.workspace = true
 reth-evm.workspace = true

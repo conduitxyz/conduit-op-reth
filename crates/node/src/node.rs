@@ -25,6 +25,7 @@ use reth_optimism_payload_builder::{
 };
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::eth::OpEthApiBuilder;
+use reth_optimism_txpool::interop::InteropFailsafe;
 use reth_primitives_traits::SealedHeader;
 use std::sync::Arc;
 
@@ -47,6 +48,9 @@ pub struct ConduitOpNode {
     pub gas_limit_config: OpGasLimitConfig,
     /// Local operator opt-in for SDM `PostExec` production.
     pub sdm_post_exec_opt_in: SdmPostExecOptIn,
+    /// Interop failsafe gate shared between the txpool's interop filter client and payload
+    /// builder.
+    pub interop_failsafe: InteropFailsafe,
     /// Optional EVM limit overrides (e.g. Conduit's higher code/initcode sizes).
     ///
     /// When `Some`, the executor in the node pipeline applies these limits to every EVM
@@ -62,6 +66,7 @@ impl ConduitOpNode {
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
             sdm_post_exec_opt_in: SdmPostExecOptIn::default(),
+            interop_failsafe: InteropFailsafe::default(),
             evm_limits: None,
         }
     }
@@ -124,13 +129,20 @@ where
             .pool(
                 OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)
-                    .with_interop(self.args.interop_http.clone(), self.args.interop_safety_level),
+                    .with_interop(
+                        self.args.interop_http.clone(),
+                        self.args.interop_min_responses,
+                        self.args.interop_safety_level,
+                    )
+                    .with_interop_failsafe(self.interop_failsafe.clone()),
             )
             .payload(BasicPayloadServiceBuilder::new(
                 OpPayloadBuilder::new(compute_pending_block)
                     .with_da_config(self.da_config.clone())
                     .with_gas_limit_config(self.gas_limit_config.clone())
-                    .with_sdm_post_exec_opt_in(self.sdm_post_exec_opt_in.clone()),
+                    .with_sdm_post_exec_opt_in(self.sdm_post_exec_opt_in.clone())
+                    .with_interop_failsafe(self.interop_failsafe.clone())
+                    .with_max_uncompressed_block_size(self.args.max_uncompressed_block_size),
             ))
             .network(OpNetworkBuilder::new(disable_txpool_gossip, !discovery_v4))
             .consensus(OpConsensusBuilder::default())

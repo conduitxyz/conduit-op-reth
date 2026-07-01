@@ -53,12 +53,10 @@ pub async fn launch_node(
         return handle.node_exit_future.await;
     }
 
-    let path = args
-        .proofs_history_storage_path
-        .clone()
-        .expect("Path must be provided if not using in-memory storage");
+    // Defaults to `<reth-data-dir>/historical-proofs` when not supplied.
+    let path = args.history.resolve_storage_path(builder.config().datadir().as_ref());
 
-    match args.proofs_history_storage_version {
+    match args.history.storage_version {
         ProofsStorageVersion::V1 => {
             info!(target: "reth::cli", "Using on-disk storage for proofs history (v1)");
             let mdbx = Arc::new(
@@ -92,6 +90,7 @@ where
 
     let RollupArgs { proofs_history_window, proofs_history_verification_interval, .. } =
         args.clone();
+    let proofs_history_window = proofs_history_window.window;
     let flashblocks_enabled = args.flashblocks_url.is_some();
 
     let builder = install_flashblocks_call_overrides(
@@ -118,6 +117,7 @@ where
         .extend_rpc_modules(move |ctx| {
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
             let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
+            let auth_api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
             let debug_ext = DebugApiExt::new(
                 ctx.node().provider().clone(),
                 ctx.registry.eth_api().clone(),
@@ -126,8 +126,9 @@ where
                 ctx.node().evm_config().clone(),
             );
             let eth_replaced = ctx.modules.replace_configured(api_ext.into_rpc())?;
+            let auth_eth_replaced = ctx.auth_module.replace_auth_methods(auth_api_ext.into_rpc())?;
             let debug_replaced = ctx.modules.replace_configured(debug_ext.into_rpc())?;
-            info!(target: "reth::cli", eth_replaced, debug_replaced, "Proofs-history RPC overrides installed");
+            info!(target: "reth::cli", eth_replaced, auth_eth_replaced, debug_replaced, "Proofs-history RPC overrides installed");
             Ok(())
         })
         .launch_with_debug_capabilities()

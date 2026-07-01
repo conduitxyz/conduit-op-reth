@@ -7,7 +7,12 @@
 use crate::{chainspec::StateOverrideFork0Config, hardforks::ConduitOpHardforks};
 use alloy_evm::Database;
 use alloy_primitives::U256;
-use revm::{DatabaseCommit, bytecode::Bytecode, primitives::HashMap, state::EvmStorageSlot};
+use revm::{
+    DatabaseCommit,
+    bytecode::Bytecode,
+    primitives::HashMap,
+    state::{EvmStorageSlot, TransactionId},
+};
 use tracing::info;
 
 /// Applies state updates configured for `StateOverrideFork0` at the transition block.
@@ -59,7 +64,10 @@ where
                 let value = U256::from_be_bytes(value.0);
                 // TODO(rezmah): review whether original_value=ZERO and transaction_id=0
                 // are correct for pre-execution storage overrides
-                revm_acc.storage.insert(key, EvmStorageSlot::new_changed(U256::ZERO, value, 0));
+                revm_acc.storage.insert(
+                    key,
+                    EvmStorageSlot::new_changed(U256::ZERO, value, TransactionId::ZERO),
+                );
             }
         }
 
