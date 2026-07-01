@@ -2360,6 +2360,7 @@ dependencies = [
  "reth-optimism-primitives",
  "reth-optimism-rpc",
  "reth-optimism-trie",
+ "reth-optimism-txpool",
  "reth-primitives-traits",
  "reth-revm",
  "reth-rpc-eth-api",
