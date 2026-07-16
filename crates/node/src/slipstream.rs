@@ -36,7 +36,9 @@ const SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD: &str =
     "slipstream_sendRawTransactionBatchWithHints";
 
 #[derive(Debug, Clone, Copy)]
-pub struct SlipstreamHintConfig {
+pub struct SlipstreamConfig {
+    pub forward_concurrency: usize,
+    pub forward_timeout: Duration,
     pub build_concurrency: usize,
     pub build_timeout: Duration,
     pub batch_timeout: Duration,
@@ -114,7 +116,8 @@ pub struct SlipstreamRpcExt<Eth> {
     sequencer_client: SequencerClient,
     eth_api: Eth,
     compute_hints: bool,
-    hint_config: SlipstreamHintConfig,
+    config: SlipstreamConfig,
+    forward_permits: Arc<Semaphore>,
     hint_permits: Arc<Semaphore>,
     metrics: SlipstreamMetrics,
 }
@@ -124,14 +127,15 @@ impl<Eth> SlipstreamRpcExt<Eth> {
         sequencer_client: SequencerClient,
         eth_api: Eth,
         compute_hints: bool,
-        hint_config: SlipstreamHintConfig,
+        config: SlipstreamConfig,
     ) -> Self {
         Self {
             sequencer_client,
             eth_api,
             compute_hints,
-            hint_config,
-            hint_permits: Arc::new(Semaphore::new(hint_config.build_concurrency)),
+            config,
+            forward_permits: Arc::new(Semaphore::new(config.forward_concurrency)),
+            hint_permits: Arc::new(Semaphore::new(config.build_concurrency)),
             metrics: SlipstreamMetrics::default(),
         }
     }
@@ -143,6 +147,28 @@ where
     Eth: FullEthApi<NetworkTypes = Optimism> + 'static,
 {
     async fn send_raw_transaction_batch(&self, txs: Vec<Bytes>) -> RpcResult<SlipstreamBatchAck> {
+        let deadline = tokio::time::Instant::now() + self.config.forward_timeout;
+        let _permit =
+            tokio::time::timeout_at(deadline, Arc::clone(&self.forward_permits).acquire_owned())
+                .await
+                .map_err(|_| {
+                    self.metrics.slipstream_forward_error_count.increment(1);
+                    forwarding_timeout_error()
+                })?
+                .expect("Slipstream forwarding semaphore is never closed");
+
+        tokio::time::timeout_at(deadline, self.forward_batch(txs)).await.map_err(|_| {
+            self.metrics.slipstream_forward_error_count.increment(1);
+            forwarding_timeout_error()
+        })?
+    }
+}
+
+impl<Eth> SlipstreamRpcExt<Eth>
+where
+    Eth: FullEthApi<NetworkTypes = Optimism> + 'static,
+{
+    async fn forward_batch(&self, txs: Vec<Bytes>) -> RpcResult<SlipstreamBatchAck> {
         self.metrics.slipstream_forwarded_batches.increment(1);
         self.metrics.slipstream_forwarded_txs.increment(txs.len() as u64);
         debug!(
@@ -154,7 +180,7 @@ where
 
         if self.compute_hints {
             let minimum_hinted_size = unhinted_txs_json_size(&txs);
-            if minimum_hinted_size > self.hint_config.max_batch_bytes {
+            if minimum_hinted_size > self.config.max_batch_bytes {
                 warn!(
                     target: "slipstream",
                     minimum_hinted_size,
@@ -163,7 +189,7 @@ where
             } else {
                 let hinted_txs = self.build_hints(txs.clone()).await;
                 let hinted_size = hinted_txs_json_size(&hinted_txs);
-                if hinted_size <= self.hint_config.max_batch_bytes {
+                if hinted_size <= self.config.max_batch_bytes {
                     match self
                         .sequencer_client
                         .request(SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD, (hinted_txs,))
@@ -196,12 +222,6 @@ where
             .inspect_err(|err| self.record_forward_error(err))
             .map_err(ErrorObjectOwned::from)
     }
-}
-
-impl<Eth> SlipstreamRpcExt<Eth>
-where
-    Eth: FullEthApi<NetworkTypes = Optimism> + 'static,
-{
     fn record_forward_error(&self, err: &impl std::fmt::Display) {
         self.metrics.slipstream_forward_error_count.increment(1);
         warn!(
@@ -213,7 +233,7 @@ where
     }
 
     async fn build_hints(&self, txs: Vec<Bytes>) -> Vec<SlipstreamHintedTx> {
-        let batch_deadline = tokio::time::Instant::now() + self.hint_config.batch_timeout;
+        let batch_deadline = tokio::time::Instant::now() + self.config.batch_timeout;
         let permits = Arc::clone(&self.hint_permits);
         let mut hinted = stream::iter(txs.into_iter().enumerate())
             .map(|(index, tx)| {
@@ -221,7 +241,7 @@ where
                 async move {
                     self.metrics.slipstream_hint_build_attempt_count.increment(1);
                     let deadline = batch_deadline
-                        .min(tokio::time::Instant::now() + self.hint_config.build_timeout);
+                        .min(tokio::time::Instant::now() + self.config.build_timeout);
                     let permit = tokio::time::timeout_at(deadline, permits.acquire_owned()).await;
                     let hint = if let Ok(Ok(permit)) = permit {
                         let started = std::time::Instant::now();
@@ -239,8 +259,11 @@ where
                                         Some(state_override),
                                     )
                                     .await
-                                    .map(|result| result.access_list)
                                     .map_err(|err| err.to_string())
+                                    .and_then(|result| match result.error {
+                                        Some(err) => Err(err),
+                                        None => Ok(result.access_list),
+                                    })
                                 });
                                 match tokio::time::timeout_at(deadline, &mut task).await {
                                     Ok(Ok(result)) => result,
@@ -274,7 +297,7 @@ where
                     (index, SlipstreamHintedTx { tx, hint })
                 }
             })
-            .buffer_unordered(self.hint_config.build_concurrency)
+            .buffer_unordered(self.config.build_concurrency)
             .collect::<Vec<_>>()
             .await;
         hinted.sort_unstable_by_key(|(index, _)| *index);
@@ -330,6 +353,10 @@ fn is_method_not_found(err: &SequencerClientError) -> bool {
         err,
         SequencerClientError::HttpError(RpcError::ErrorResp(payload)) if payload.code == -32601
     )
+}
+
+fn forwarding_timeout_error() -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(-32000, "Slipstream forwarding timed out", None::<()>)
 }
 
 #[cfg(test)]

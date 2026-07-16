@@ -10,7 +10,7 @@ use crate::{
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     node::ConduitOpNode,
-    slipstream::{SlipstreamApiServer, SlipstreamHintConfig, SlipstreamRpcExt},
+    slipstream::{SlipstreamApiServer, SlipstreamConfig, SlipstreamRpcExt},
 };
 use eyre::ErrReport;
 use futures_util::FutureExt;
@@ -178,7 +178,9 @@ where
     }
 
     if let Some((args, client)) = slipstream {
-        let hint_config = SlipstreamHintConfig {
+        let config = SlipstreamConfig {
+            forward_concurrency: args.forward_concurrency,
+            forward_timeout: Duration::from_millis(args.forward_timeout_ms),
             build_concurrency: args.hint_build_concurrency,
             build_timeout: Duration::from_millis(args.hint_build_timeout_ms),
             batch_timeout: Duration::from_millis(args.hint_batch_timeout_ms),
@@ -188,7 +190,7 @@ where
             client.clone(),
             ctx.registry.eth_api().clone(),
             args.compute_hints,
-            hint_config,
+            config,
         );
         ctx.modules.add_or_replace_configured(ext.into_rpc())?;
         info!(target: "reth::cli", endpoint = client.endpoint(), compute_hints = args.compute_hints, "Slipstream forwarding RPC installed");

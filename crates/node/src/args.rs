@@ -30,6 +30,25 @@ pub struct SlipstreamArgs {
     )]
     pub compute_hints: bool,
 
+    /// Maximum concurrent Slipstream batches forwarded to the active sequencer.
+    #[arg(
+        long = "slipstream.forward-concurrency",
+        env = "SLIPSTREAM_FORWARD_CONCURRENCY",
+        default_value = "100",
+        value_parser = parse_nonzero_usize
+    )]
+    pub forward_concurrency: usize,
+
+    /// End-to-end timeout in milliseconds for acquiring forwarding capacity, computing hints,
+    /// and receiving the active sequencer's response.
+    #[arg(
+        long = "slipstream.forward-timeout-ms",
+        env = "SLIPSTREAM_FORWARD_TIMEOUT_MS",
+        default_value = "5000",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub forward_timeout_ms: u64,
+
     /// Maximum concurrent access-list simulations on this forwarding node.
     #[arg(
         long = "slipstream.hint-build-concurrency",
@@ -96,6 +115,8 @@ mod tests {
         let defaults = SlipstreamArgs::default();
         assert!(!defaults.experimental);
         assert!(!defaults.compute_hints);
+        assert_eq!(defaults.forward_concurrency, 100);
+        assert_eq!(defaults.forward_timeout_ms, 5_000);
         assert_eq!(defaults.hint_build_concurrency, 8);
         assert_eq!(defaults.hint_build_timeout_ms, 250);
         assert_eq!(defaults.hint_batch_timeout_ms, 1_000);
@@ -105,6 +126,10 @@ mod tests {
             "dummy",
             "--experimental.slipstream",
             "--slipstream.compute-hints",
+            "--slipstream.forward-concurrency",
+            "50",
+            "--slipstream.forward-timeout-ms",
+            "3000",
             "--slipstream.hint-build-concurrency",
             "4",
             "--slipstream.hint-build-timeout-ms",
@@ -117,6 +142,8 @@ mod tests {
         let args = SlipstreamArgs::from_arg_matches(&matches).expect("arguments parse");
         assert!(args.experimental);
         assert!(args.compute_hints);
+        assert_eq!(args.forward_concurrency, 50);
+        assert_eq!(args.forward_timeout_ms, 3_000);
         assert_eq!(args.hint_build_concurrency, 4);
         assert_eq!(args.hint_build_timeout_ms, 125);
         assert_eq!(args.hint_batch_timeout_ms, 750);
@@ -125,6 +152,11 @@ mod tests {
         assert!(
             SlipstreamArgs::augment_args(clap::Command::new("dummy"))
                 .try_get_matches_from(["dummy", "--slipstream.hint-build-concurrency", "0",])
+                .is_err()
+        );
+        assert!(
+            SlipstreamArgs::augment_args(clap::Command::new("dummy"))
+                .try_get_matches_from(["dummy", "--slipstream.forward-concurrency", "0"])
                 .is_err()
         );
     }
