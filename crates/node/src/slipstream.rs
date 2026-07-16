@@ -310,12 +310,16 @@ fn prepare_hint(raw: &Bytes) -> Result<(OpTransactionRequest, StateOverride), St
         recover_raw_transaction::<OpPooledTransaction>(raw).map_err(|err| err.to_string())?;
     let signer = recovered.signer();
     let nonce = recovered.nonce();
-    let request: OpTransactionRequest = match recovered.into_inner() {
+    let mut request: OpTransactionRequest = match recovered.into_inner() {
         OpPooledTransaction::Legacy(tx) => tx.into(),
         OpPooledTransaction::Eip2930(tx) => tx.into(),
         OpPooledTransaction::Eip1559(tx) => tx.into(),
         OpPooledTransaction::Eip7702(tx) => tx.into(),
     };
+    // Access-list entries add intrinsic gas. Reusing a tightly estimated signed gas limit can
+    // therefore make discovery report out-of-gas solely because of the list it just discovered.
+    // Let the simulation estimate its own gas; the forwarded signed transaction is unchanged.
+    request.as_mut().gas = None;
     let state_override = StateOverridesBuilder::default()
         .with_nonce(signer, nonce)
         .with_balance(signer, U256::MAX)
@@ -363,6 +367,20 @@ fn forwarding_timeout_error() -> ErrorObjectOwned {
 mod tests {
     use super::*;
     use alloy_eips::eip2930::AccessListItem;
+    use alloy_primitives::hex;
+
+    #[test]
+    fn hint_simulation_does_not_inherit_signed_gas_limit() {
+        let raw = Bytes::from(hex!(
+            "02f86a82038502018206a9826e129442000000000000000000000000000000000000060484d0e30db0c080a0b321803fa4187e8e965aad318bc38ba58a630c7954eb98adb99db6a565cacd29a0688328cbec3b0ba0ac1f7097767c5a5e552ee7b7bdab32ccc0cef07bf56a1eda"
+        ));
+
+        let (request, _) = prepare_hint(&raw).unwrap();
+        let request: alloy_rpc_types_eth::TransactionRequest = request.into();
+
+        assert_eq!(request.gas, None);
+        assert_eq!(request.nonce, Some(2));
+    }
 
     #[test]
     fn hinted_wire_format_and_size_match_builder() {
