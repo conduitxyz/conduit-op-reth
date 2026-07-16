@@ -60,6 +60,8 @@ alloy-sol-types = "1.6.0"
 alloy-rpc-types-eth = "2.0.5"
 alloy-json-rpc = "2.0.5"
 op-alloy-consensus = "2.0.0"
+op-alloy-network = "2.0.0"
+op-alloy-rpc-types = "2.0.0"
 op-alloy-rpc-types-engine = "2.0.0"
 
 # Revm
@@ -74,6 +76,8 @@ reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v2.
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
 reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
+reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
+reth-metrics = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 alloy-rpc-types-engine = "2.0.5"
@@ -89,6 +93,7 @@ eyre = "0.6"
 tempfile = "3"
 futures-util = "0.3.31"
 jsonrpsee = "0.26"
+metrics = "0.24"
 
 # Unify op-alloy/alloy-op crates so crates.io transitive deps resolve to the same
 # git versions used by the ethereum-optimism/optimism repo.
