@@ -7,7 +7,10 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_consensus::Transaction;
-use alloy_eips::{BlockId, eip2930::AccessList};
+use alloy_eips::{
+    BlockId,
+    eip2930::{AccessList, AccessListItem},
+};
 use alloy_json_rpc::RpcError;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rpc_types_eth::state::{StateOverride, StateOverridesBuilder};
@@ -246,7 +249,7 @@ where
                     let hint = if let Ok(Ok(permit)) = permit {
                         let started = std::time::Instant::now();
                         let result = match prepare_hint(&tx) {
-                            Ok((request, state_override)) => {
+                            Ok((request, state_override, sender, destination)) => {
                                 let eth_api = self.eth_api.clone();
                                 // State reads are not cancellable. The detached task retains its permit after
                                 // timeout so replacement work cannot exceed the node-wide concurrency cap.
@@ -262,7 +265,14 @@ where
                                     .map_err(|err| err.to_string())
                                     .and_then(|result| match result.error {
                                         Some(err) => Err(err),
-                                        None => Ok(result.access_list),
+                                        None => {
+                                            let mut access_list = result.access_list;
+                                            add_hint_accounts(
+                                                &mut access_list,
+                                                [Some(sender), destination],
+                                            );
+                                            Ok(access_list)
+                                        }
                                     })
                                 });
                                 match tokio::time::timeout_at(deadline, &mut task).await {
@@ -305,11 +315,14 @@ where
     }
 }
 
-fn prepare_hint(raw: &Bytes) -> Result<(OpTransactionRequest, StateOverride), String> {
+fn prepare_hint(
+    raw: &Bytes,
+) -> Result<(OpTransactionRequest, StateOverride, Address, Option<Address>), String> {
     let recovered =
         recover_raw_transaction::<OpPooledTransaction>(raw).map_err(|err| err.to_string())?;
     let signer = recovered.signer();
     let nonce = recovered.nonce();
+    let destination = recovered.to();
     let mut request: OpTransactionRequest = match recovered.into_inner() {
         OpPooledTransaction::Legacy(tx) => tx.into(),
         OpPooledTransaction::Eip2930(tx) => tx.into(),
@@ -324,7 +337,18 @@ fn prepare_hint(raw: &Bytes) -> Result<(OpTransactionRequest, StateOverride), St
         .with_nonce(signer, nonce)
         .with_balance(signer, U256::MAX)
         .build();
-    Ok((request.from(signer), state_override))
+    Ok((request.from(signer), state_override, signer, destination))
+}
+
+fn add_hint_accounts(
+    access_list: &mut AccessList,
+    accounts: impl IntoIterator<Item = Option<Address>>,
+) {
+    for address in accounts.into_iter().flatten() {
+        if !access_list.0.iter().any(|item| item.address == address) {
+            access_list.0.push(AccessListItem { address, storage_keys: Vec::new() });
+        }
+    }
 }
 
 fn hinted_txs_json_size(txs: &[SlipstreamHintedTx]) -> usize {
@@ -366,8 +390,7 @@ fn forwarding_timeout_error() -> ErrorObjectOwned {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_eips::eip2930::AccessListItem;
-    use alloy_primitives::hex;
+    use alloy_primitives::{address, hex};
 
     #[test]
     fn hint_simulation_does_not_inherit_signed_gas_limit() {
@@ -375,11 +398,44 @@ mod tests {
             "02f86a82038502018206a9826e129442000000000000000000000000000000000000060484d0e30db0c080a0b321803fa4187e8e965aad318bc38ba58a630c7954eb98adb99db6a565cacd29a0688328cbec3b0ba0ac1f7097767c5a5e552ee7b7bdab32ccc0cef07bf56a1eda"
         ));
 
-        let (request, _) = prepare_hint(&raw).unwrap();
+        let (request, _, _, _) = prepare_hint(&raw).unwrap();
         let request: alloy_rpc_types_eth::TransactionRequest = request.into();
 
         assert_eq!(request.gas, None);
         assert_eq!(request.nonce, Some(2));
+    }
+
+    #[test]
+    fn hint_includes_sender_and_destination_without_losing_existing_storage_keys() {
+        let sender = address!("1000000000000000000000000000000000000000");
+        let destination = address!("2000000000000000000000000000000000000000");
+        let other = address!("3000000000000000000000000000000000000000");
+        let keys = vec![B256::ZERO, B256::repeat_byte(1)];
+        let mut hint = AccessList(vec![
+            AccessListItem { address: destination, storage_keys: keys.clone() },
+            AccessListItem { address: other, storage_keys: vec![B256::repeat_byte(2)] },
+        ]);
+
+        add_hint_accounts(&mut hint, [Some(sender), Some(destination)]);
+
+        assert_eq!(hint.0.len(), 3);
+        assert_eq!(hint.0[0].address, destination);
+        assert_eq!(hint.0[0].storage_keys, keys);
+        assert_eq!(hint.0[2], AccessListItem { address: sender, storage_keys: Vec::new() });
+    }
+
+    #[test]
+    fn hint_accounts_handle_self_transfer_and_contract_creation() {
+        let sender = address!("1000000000000000000000000000000000000000");
+        let mut hint = AccessList::default();
+
+        add_hint_accounts(&mut hint, [Some(sender), Some(sender)]);
+        add_hint_accounts(&mut hint, [Some(sender), None]);
+
+        assert_eq!(
+            hint,
+            AccessList(vec![AccessListItem { address: sender, storage_keys: Vec::new() }])
+        );
     }
 
     #[test]
