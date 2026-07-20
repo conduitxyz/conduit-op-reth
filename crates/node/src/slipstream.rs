@@ -31,7 +31,7 @@ use reth_optimism_rpc::{SequencerClient, SequencerClientError};
 use reth_rpc_eth_api::helpers::{EthCall, FullEthApi};
 use reth_rpc_eth_types::utils::recover_raw_transaction;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, warn};
 
 const SEND_RAW_TRANSACTION_BATCH_METHOD: &str = "slipstream_sendRawTransactionBatch";
@@ -44,7 +44,6 @@ pub struct SlipstreamConfig {
     pub forward_timeout: Duration,
     pub build_concurrency: usize,
     pub build_timeout: Duration,
-    pub batch_timeout: Duration,
     pub max_batch_bytes: usize,
 }
 
@@ -110,8 +109,16 @@ struct SlipstreamMetrics {
     slipstream_hint_build_success_count: Counter,
     /// Access-list hint generation duration.
     slipstream_hint_build_duration: Histogram,
+    /// Time spent waiting for access-list simulation capacity.
+    slipstream_hint_permit_wait_duration: Histogram,
     /// Failed or timed-out access-list hint generations.
     slipstream_hint_build_error_count: Counter,
+    /// Access-list simulations that exceeded the per-hint execution timeout.
+    slipstream_hint_simulation_timeout_count: Counter,
+    /// Access-list simulations that failed after acquiring capacity.
+    slipstream_hint_simulation_error_count: Counter,
+    /// Transactions that could not be decoded or prepared for access-list simulation.
+    slipstream_hint_preparation_error_count: Counter,
 }
 
 #[derive(Clone)]
@@ -150,20 +157,7 @@ where
     Eth: FullEthApi<NetworkTypes = Optimism> + 'static,
 {
     async fn send_raw_transaction_batch(&self, txs: Vec<Bytes>) -> RpcResult<SlipstreamBatchAck> {
-        let deadline = tokio::time::Instant::now() + self.config.forward_timeout;
-        let _permit =
-            tokio::time::timeout_at(deadline, Arc::clone(&self.forward_permits).acquire_owned())
-                .await
-                .map_err(|_| {
-                    self.metrics.slipstream_forward_error_count.increment(1);
-                    forwarding_timeout_error()
-                })?
-                .expect("Slipstream forwarding semaphore is never closed");
-
-        tokio::time::timeout_at(deadline, self.forward_batch(txs)).await.map_err(|_| {
-            self.metrics.slipstream_forward_error_count.increment(1);
-            forwarding_timeout_error()
-        })?
+        self.forward_batch(txs).await
     }
 }
 
@@ -193,11 +187,17 @@ where
                 let hinted_txs = self.build_hints(txs.clone()).await;
                 let hinted_size = hinted_txs_json_size(&hinted_txs);
                 if hinted_size <= self.config.max_batch_bytes {
-                    match self
+                    let _permit = self.acquire_forward_permit().await?;
+                    let request = self
                         .sequencer_client
-                        .request(SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD, (hinted_txs,))
+                        .request(SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD, (hinted_txs,));
+                    let response = tokio::time::timeout(self.config.forward_timeout, request)
                         .await
-                    {
+                        .map_err(|_| {
+                            self.metrics.slipstream_forward_error_count.increment(1);
+                            forwarding_timeout_error()
+                        })?;
+                    match response {
                         Ok(ack) => return Ok(ack),
                         Err(err) if is_method_not_found(&err) => warn!(
                             target: "slipstream",
@@ -219,12 +219,31 @@ where
             }
         }
 
-        self.sequencer_client
-            .request(SEND_RAW_TRANSACTION_BATCH_METHOD, (txs,))
+        let _permit = self.acquire_forward_permit().await?;
+        let request = self.sequencer_client.request(SEND_RAW_TRANSACTION_BATCH_METHOD, (txs,));
+        tokio::time::timeout(self.config.forward_timeout, request)
             .await
+            .map_err(|_| {
+                self.metrics.slipstream_forward_error_count.increment(1);
+                forwarding_timeout_error()
+            })?
             .inspect_err(|err| self.record_forward_error(err))
             .map_err(ErrorObjectOwned::from)
     }
+
+    async fn acquire_forward_permit(&self) -> Result<OwnedSemaphorePermit, ErrorObjectOwned> {
+        tokio::time::timeout(
+            self.config.forward_timeout,
+            Arc::clone(&self.forward_permits).acquire_owned(),
+        )
+        .await
+        .map_err(|_| {
+            self.metrics.slipstream_forward_error_count.increment(1);
+            forwarding_timeout_error()
+        })
+        .map(|permit| permit.expect("Slipstream forwarding semaphore is never closed"))
+    }
+
     fn record_forward_error(&self, err: &impl std::fmt::Display) {
         self.metrics.slipstream_forward_error_count.increment(1);
         warn!(
@@ -236,74 +255,90 @@ where
     }
 
     async fn build_hints(&self, txs: Vec<Bytes>) -> Vec<SlipstreamHintedTx> {
-        let batch_deadline = tokio::time::Instant::now() + self.config.batch_timeout;
         let permits = Arc::clone(&self.hint_permits);
         let mut hinted = stream::iter(txs.into_iter().enumerate())
             .map(|(index, tx)| {
                 let permits = Arc::clone(&permits);
                 async move {
                     self.metrics.slipstream_hint_build_attempt_count.increment(1);
-                    let deadline = batch_deadline
-                        .min(tokio::time::Instant::now() + self.config.build_timeout);
-                    let permit = tokio::time::timeout_at(deadline, permits.acquire_owned()).await;
-                    let hint = if let Ok(Ok(permit)) = permit {
-                        let started = std::time::Instant::now();
-                        let result = match prepare_hint(&tx) {
-                            Ok((request, state_override, sender, destination)) => {
-                                let eth_api = self.eth_api.clone();
-                                // State reads are not cancellable. The detached task retains its permit after
-                                // timeout so replacement work cannot exceed the node-wide concurrency cap.
-                                let mut task = tokio::spawn(async move {
-                                    let _permit = permit;
-                                    EthCall::create_access_list_at(
-                                        &eth_api,
-                                        request,
-                                        Some(BlockId::latest()),
-                                        Some(state_override),
-                                    )
-                                    .await
-                                    .map_err(|err| err.to_string())
-                                    .and_then(|result| match result.error {
-                                        Some(err) => Err(err),
-                                        None => {
-                                            let mut access_list = result.access_list;
-                                            add_hint_accounts(
-                                                &mut access_list,
-                                                [Some(sender), destination],
-                                            );
-                                            Ok(access_list)
-                                        }
-                                    })
-                                });
-                                match tokio::time::timeout_at(deadline, &mut task).await {
-                                    Ok(Ok(result)) => result,
-                                    Ok(Err(err)) => Err(format!("hint task failed: {err}")),
-                                    Err(_) => Err("hint build timed out".to_string()),
-                                }
+                    let permit_wait_started = std::time::Instant::now();
+                    let permit = permits
+                        .acquire_owned()
+                        .await
+                        .expect("Slipstream hint semaphore is never closed");
+                    self.metrics
+                        .slipstream_hint_permit_wait_duration
+                        .record(permit_wait_started.elapsed());
+                    let started = std::time::Instant::now();
+                    let result = match prepare_hint(&tx) {
+                        Ok((request, state_override, sender, destination)) => {
+                            let eth_api = self.eth_api.clone();
+                            // State reads are not cancellable. The detached task retains its permit after
+                            // timeout so replacement work cannot exceed the node-wide concurrency cap.
+                            let mut task = tokio::spawn(async move {
+                                let _permit = permit;
+                                EthCall::create_access_list_at(
+                                    &eth_api,
+                                    request,
+                                    Some(BlockId::latest()),
+                                    Some(state_override),
+                                )
+                                .await
+                                .map_err(|err| err.to_string())
+                                .and_then(|result| match result.error {
+                                    Some(err) => Err(err),
+                                    None => {
+                                        let mut access_list = result.access_list;
+                                        add_hint_accounts(
+                                            &mut access_list,
+                                            [Some(sender), destination],
+                                        );
+                                        Ok(access_list)
+                                    }
+                                })
+                            });
+                            // Start the simulation timeout only after the permit is acquired and
+                            // the transaction is prepared.
+                            match tokio::time::timeout(self.config.build_timeout, &mut task).await {
+                                Ok(Ok(Ok(hint))) => Ok(hint),
+                                Ok(Ok(Err(err))) => Err(HintBuildFailure::Simulation(err)),
+                                Ok(Err(err)) => Err(HintBuildFailure::Simulation(format!(
+                                    "hint task failed: {err}"
+                                ))),
+                                Err(_) => Err(HintBuildFailure::SimulationTimeout),
                             }
-                            Err(err) => {
-                                drop(permit);
-                                Err(err)
-                            }
-                        };
-                        let hint = match result {
-                            Ok(hint) => {
-                                self.metrics.slipstream_hint_build_success_count.increment(1);
-                                Some(hint)
-                            }
-                            Err(err) => {
-                                self.metrics.slipstream_hint_build_error_count.increment(1);
-                                debug!(target: "slipstream", index, error = %err, "failed to build Slipstream access-list hint");
-                                None
-                            }
-                        };
-                        self.metrics.slipstream_hint_build_duration.record(started.elapsed());
-                        hint
-                    } else {
-                        self.metrics.slipstream_hint_build_error_count.increment(1);
-                        debug!(target: "slipstream", index, "Slipstream access-list hint budget exhausted");
-                        None
+                        }
+                        Err(err) => {
+                            drop(permit);
+                            Err(HintBuildFailure::Preparation(err))
+                        }
                     };
+                    let hint = match result {
+                        Ok(hint) => {
+                            self.metrics.slipstream_hint_build_success_count.increment(1);
+                            Some(hint)
+                        }
+                        Err(failure) => {
+                        self.metrics.slipstream_hint_build_error_count.increment(1);
+                            match &failure {
+                                HintBuildFailure::SimulationTimeout => self
+                                    .metrics
+                                    .slipstream_hint_simulation_timeout_count
+                                    .increment(1),
+                                HintBuildFailure::Simulation(_) => self
+                                    .metrics
+                                    .slipstream_hint_simulation_error_count
+                                    .increment(1),
+                                HintBuildFailure::Preparation(_) => self
+                                    .metrics
+                                    .slipstream_hint_preparation_error_count
+                                    .increment(1),
+                            }
+                            debug!(target: "slipstream", index, error = %failure, "failed to build Slipstream access-list hint");
+                            None
+                        }
+                    };
+                    self.metrics.slipstream_hint_build_duration.record(started.elapsed());
                     (index, SlipstreamHintedTx { tx, hint })
                 }
             })
@@ -312,6 +347,21 @@ where
             .await;
         hinted.sort_unstable_by_key(|(index, _)| *index);
         hinted.into_iter().map(|(_, tx)| tx).collect()
+    }
+}
+
+enum HintBuildFailure {
+    SimulationTimeout,
+    Simulation(String),
+    Preparation(String),
+}
+
+impl std::fmt::Display for HintBuildFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SimulationTimeout => f.write_str("hint simulation timed out"),
+            Self::Simulation(err) | Self::Preparation(err) => f.write_str(err),
+        }
     }
 }
 

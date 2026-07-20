@@ -39,8 +39,8 @@ pub struct SlipstreamArgs {
     )]
     pub forward_concurrency: usize,
 
-    /// End-to-end timeout in milliseconds for acquiring forwarding capacity, computing hints,
-    /// and receiving the active sequencer's response.
+    /// Timeout in milliseconds for acquiring forwarding capacity and for each active-sequencer
+    /// request. Waiting for hint simulation capacity is not charged against this timeout.
     #[arg(
         long = "slipstream.forward-timeout-ms",
         env = "SLIPSTREAM_FORWARD_TIMEOUT_MS",
@@ -66,15 +66,6 @@ pub struct SlipstreamArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     pub hint_build_timeout_ms: u64,
-
-    /// Maximum time in milliseconds to spend computing hints for one batch.
-    #[arg(
-        long = "slipstream.hint-batch-timeout-ms",
-        env = "SLIPSTREAM_HINT_BATCH_TIMEOUT_MS",
-        default_value = "1000",
-        value_parser = clap::value_parser!(u64).range(1..)
-    )]
-    pub hint_batch_timeout_ms: u64,
 
     /// Maximum serialized bytes for a hinted transaction array. Larger arrays are forwarded
     /// through the plain Slipstream method.
@@ -119,7 +110,6 @@ mod tests {
         assert_eq!(defaults.forward_timeout_ms, 5_000);
         assert_eq!(defaults.hint_build_concurrency, 8);
         assert_eq!(defaults.hint_build_timeout_ms, 250);
-        assert_eq!(defaults.hint_batch_timeout_ms, 1_000);
         assert_eq!(defaults.max_hinted_batch_bytes, 10 * 1024 * 1024);
 
         let matches = SlipstreamArgs::augment_args(clap::Command::new("dummy")).get_matches_from([
@@ -134,8 +124,6 @@ mod tests {
             "4",
             "--slipstream.hint-build-timeout-ms",
             "125",
-            "--slipstream.hint-batch-timeout-ms",
-            "750",
             "--slipstream.max-hinted-batch-bytes",
             "5242880",
         ]);
@@ -146,7 +134,6 @@ mod tests {
         assert_eq!(args.forward_timeout_ms, 3_000);
         assert_eq!(args.hint_build_concurrency, 4);
         assert_eq!(args.hint_build_timeout_ms, 125);
-        assert_eq!(args.hint_batch_timeout_ms, 750);
         assert_eq!(args.max_hinted_batch_bytes, 5 * 1024 * 1024);
 
         assert!(

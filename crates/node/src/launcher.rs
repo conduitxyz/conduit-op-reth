@@ -183,7 +183,6 @@ where
             forward_timeout: Duration::from_millis(args.forward_timeout_ms),
             build_concurrency: args.hint_build_concurrency,
             build_timeout: Duration::from_millis(args.hint_build_timeout_ms),
-            batch_timeout: Duration::from_millis(args.hint_batch_timeout_ms),
             max_batch_bytes: args.max_hinted_batch_bytes,
         };
         let ext = SlipstreamRpcExt::new(
