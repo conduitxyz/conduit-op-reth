@@ -15,9 +15,7 @@ use futures_util::FutureExt;
 use jsonrpsee::types::ErrorObject;
 use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::DatabaseMetrics;
-use reth_node_builder::{
-    FullNodeComponents, NodeBuilder, WithLaunchContext, rpc::RpcContext,
-};
+use reth_node_builder::{FullNodeComponents, NodeBuilder, WithLaunchContext, rpc::RpcContext};
 use reth_optimism_exex::OpProofsExEx;
 use reth_optimism_node::args::{ProofsStorageVersion, RollupArgs};
 use reth_optimism_rpc::{
@@ -44,9 +42,9 @@ pub async fn launch_node(
         let flashblocks_enabled = args.flashblocks_url.is_some();
         let handle = builder
             .node(ConduitOpNode::new(args))
-            .extend_rpc_modules(run_rpc_hooks(vec![flashblocks_call_overrides_hook(
-                flashblocks_enabled,
-            )]))
+            .extend_rpc_modules(move |mut ctx| {
+                install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)
+            })
             .launch_with_debug_capabilities()
             .await?;
         return handle.node_exit_future.await;
@@ -110,75 +108,52 @@ where
                 .run()
                 .boxed())
         })
-        .extend_rpc_modules(run_rpc_hooks(vec![
-            flashblocks_call_overrides_hook(flashblocks_enabled),
-            Box::new(move |ctx| {
-                info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
-                let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
-                let auth_api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
-                let debug_ext = DebugApiExt::new(
-                    ctx.node().provider().clone(),
-                    ctx.registry.eth_api().clone(),
-                    storage,
-                    ctx.node().task_executor().clone(),
-                    ctx.node().evm_config().clone(),
-                );
-                let eth_replaced = ctx.modules.replace_configured(api_ext.into_rpc())?;
-                let auth_eth_replaced =
-                    ctx.auth_module.replace_auth_methods(auth_api_ext.into_rpc())?;
-                let debug_replaced = ctx.modules.replace_configured(debug_ext.into_rpc())?;
-                info!(target: "reth::cli", eth_replaced, auth_eth_replaced, debug_replaced, "Proofs-history RPC overrides installed");
-                Ok(())
-            }),
-        ]))
+        .extend_rpc_modules(move |mut ctx| {
+            install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+
+            info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
+            let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
+            let auth_api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
+            let debug_ext = DebugApiExt::new(
+                ctx.node().provider().clone(),
+                ctx.registry.eth_api().clone(),
+                storage,
+                ctx.node().task_executor().clone(),
+                ctx.node().evm_config().clone(),
+            );
+            let eth_replaced = ctx.modules.replace_configured(api_ext.into_rpc())?;
+            let auth_eth_replaced =
+                ctx.auth_module.replace_auth_methods(auth_api_ext.into_rpc())?;
+            let debug_replaced = ctx.modules.replace_configured(debug_ext.into_rpc())?;
+            info!(target: "reth::cli", eth_replaced, auth_eth_replaced, debug_replaced, "Proofs-history RPC overrides installed");
+            Ok(())
+        })
         .launch_with_debug_capabilities()
         .await?;
 
     handle.node_exit_future.await
 }
 
-/// An RPC-module install step, run from within the single `extend_rpc_modules` closure.
-type RpcHook<N, EthApi> =
-    Box<dyn FnOnce(&mut RpcContext<'_, N, EthApi>) -> eyre::Result<()> + Send>;
-
-/// Returns an `extend_rpc_modules` closure that runs the given hooks in order.
-///
-/// reth keeps only the last `extend_rpc_modules` hook (each call replaces the previous
-/// one), so every RPC install must be collected here and go through this single closure.
-fn run_rpc_hooks<N, EthApi>(
-    hooks: Vec<RpcHook<N, EthApi>>,
-) -> impl FnOnce(RpcContext<'_, N, EthApi>) -> eyre::Result<()>
-where
-    N: FullNodeComponents,
-    EthApi: EthApiTypes,
-{
-    move |mut ctx| {
-        for hook in hooks {
-            hook(&mut ctx)?;
-        }
-        Ok(())
-    }
-}
-
-/// Returns the hook installing the flashblocks pending-state RPC overrides (`eth_call`,
-/// `eth_estimateGas`, `eth_simulateV1`); a no-op hook when `flashblocks_enabled` is false.
-fn flashblocks_call_overrides_hook<N, EthApi>(flashblocks_enabled: bool) -> RpcHook<N, EthApi>
+/// Installs the flashblocks pending-state RPC overrides (`eth_call`, `eth_estimateGas`,
+/// `eth_simulateV1`) when flashblocks are enabled.
+fn install_flashblocks_call_overrides<N, EthApi>(
+    ctx: &mut RpcContext<'_, N, EthApi>,
+    flashblocks_enabled: bool,
+) -> eyre::Result<()>
 where
     N: FullNodeComponents,
     EthApi: FullEthApi + PendingFlashblockState + Clone + Send + Sync + 'static,
     ErrorObject<'static>: From<<EthApi as EthApiTypes>::Error>,
 {
-    Box::new(move |ctx| {
-        if !flashblocks_enabled {
-            return Ok(());
-        }
+    if !flashblocks_enabled {
+        return Ok(());
+    }
 
-        info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
-        let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
-        ctx.modules.add_or_replace_configured(ext.into_rpc())?;
-        info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
-        Ok(())
-    })
+    info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
+    let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
+    ctx.modules.add_or_replace_configured(ext.into_rpc())?;
+    info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+    Ok(())
 }
 
 /// Spawns a task that periodically reports metrics for the proofs DB.
