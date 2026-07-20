@@ -43,8 +43,8 @@ pub trait PendingFlashblockState: Send + Sync {
     /// - the canonical anchor block the state reads resolve against (block N-1),
     /// - the accumulated state overrides representing the flashblock's preconfirmed state,
     /// - the block-environment overrides for the block being built (block N), so
-    ///   `NUMBER`/`TIMESTAMP`/`BASEFEE`/`COINBASE`/`PREVRANDAO` match what a transaction
-    ///   included in the flashblock actually executes under.
+    ///   `NUMBER`/`TIMESTAMP`/`BASEFEE`/`COINBASE`/`PREVRANDAO` match what a transaction included
+    ///   in the flashblock actually executes under.
     fn pending_flashblock_overrides(
         &self,
     ) -> impl Future<Output = Option<(BlockId, StateOverride, BlockOverrides)>> + Send;
@@ -505,13 +505,14 @@ mod tests {
             base_fee: Some(U256::from(7)),
             ..Default::default()
         };
-        let user = BlockOverrides {
-            number: Some(U256::from(200)),
-            ..Default::default()
-        };
+        let user = BlockOverrides { number: Some(U256::from(200)), ..Default::default() };
         let merged = merge_block_overrides(Some(flashblock), Some(user)).unwrap();
         assert_eq!(merged.number, Some(U256::from(200)), "user number wins");
         assert_eq!(merged.time, Some(1234), "unset user field falls back to flashblock");
-        assert_eq!(merged.base_fee, Some(U256::from(7)), "unset user field falls back to flashblock");
+        assert_eq!(
+            merged.base_fee,
+            Some(U256::from(7)),
+            "unset user field falls back to flashblock"
+        );
     }
 }
