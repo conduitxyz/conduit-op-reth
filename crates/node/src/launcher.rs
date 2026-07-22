@@ -6,19 +6,23 @@
 // to preserve `ConduitOpChainSpec` and `ConduitOpNode` while reusing the same proof-history wiring.
 
 use crate::{
+    args::{ConduitArgs, SlipstreamArgs},
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     node::ConduitOpNode,
+    slipstream::{SlipstreamApiServer, SlipstreamConfig, SlipstreamRpcExt},
 };
 use eyre::ErrReport;
 use futures_util::FutureExt;
 use jsonrpsee::types::ErrorObject;
+use op_alloy_network::Optimism;
 use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::DatabaseMetrics;
 use reth_node_builder::{FullNodeComponents, NodeBuilder, WithLaunchContext, rpc::RpcContext};
 use reth_optimism_exex::OpProofsExEx;
 use reth_optimism_node::args::{ProofsStorageVersion, RollupArgs};
 use reth_optimism_rpc::{
+    SequencerClient,
     debug::{DebugApiExt, DebugApiOverrideServer},
     eth::proofs::{EthApiExt, EthApiOverrideServer},
 };
@@ -36,14 +40,27 @@ use tracing::info;
 /// overrides.
 pub async fn launch_node(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
-    args: RollupArgs,
+    args: ConduitArgs,
 ) -> eyre::Result<(), ErrReport> {
-    if !args.proofs_history {
-        let flashblocks_enabled = args.flashblocks_url.is_some();
+    let ConduitArgs { rollup, slipstream } = args;
+    let slipstream = if slipstream.experimental {
+        let endpoint = rollup
+            .sequencer
+            .clone()
+            .ok_or_else(|| eyre::eyre!("--experimental.slipstream requires --rollup.sequencer"))?;
+        let client =
+            SequencerClient::new_with_headers(endpoint, rollup.sequencer_headers.clone()).await?;
+        Some((slipstream, client))
+    } else {
+        None
+    };
+
+    if !rollup.proofs_history {
+        let flashblocks_enabled = rollup.flashblocks_url.is_some();
         let handle = builder
-            .node(ConduitOpNode::new(args))
+            .node(ConduitOpNode::new(rollup))
             .extend_rpc_modules(move |mut ctx| {
-                install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)
+                install_rpc_overrides(&mut ctx, flashblocks_enabled, &slipstream)
             })
             .launch_with_debug_capabilities()
             .await?;
@@ -51,16 +68,16 @@ pub async fn launch_node(
     }
 
     // Defaults to `<reth-data-dir>/historical-proofs` when not supplied.
-    let path = args.history.resolve_storage_path(builder.config().datadir().as_ref());
+    let path = rollup.history.resolve_storage_path(builder.config().datadir().as_ref());
 
-    match args.history.storage_version {
+    match rollup.history.storage_version {
         ProofsStorageVersion::V1 => {
             info!(target: "reth::cli", "Using on-disk storage for proofs history (v1)");
             let mdbx = Arc::new(
                 MdbxProofsStorage::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorage: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx).await
+            launch_with_proof_history(builder, rollup, slipstream, mdbx).await
         }
         ProofsStorageVersion::V2 => {
             info!(target: "reth::cli", "Using on-disk storage for proofs history (v2)");
@@ -68,7 +85,7 @@ pub async fn launch_node(
                 MdbxProofsStorageV2::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorageV2: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx).await
+            launch_with_proof_history(builder, rollup, slipstream, mdbx).await
         }
     }
 }
@@ -77,6 +94,7 @@ pub async fn launch_node(
 async fn launch_with_proof_history<S>(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
     args: RollupArgs,
+    slipstream: Option<(SlipstreamArgs, SequencerClient)>,
     mdbx: Arc<S>,
 ) -> eyre::Result<(), ErrReport>
 where
@@ -109,7 +127,9 @@ where
                 .boxed())
         })
         .extend_rpc_modules(move |mut ctx| {
-            install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+            // Reth stores a single RPC-extension hook, so flashblocks, Slipstream, and proof
+            // history overrides must be installed together.
+            install_rpc_overrides(&mut ctx, flashblocks_enabled, &slipstream)?;
 
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
             let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
@@ -134,25 +154,47 @@ where
     handle.node_exit_future.await
 }
 
-/// Installs the flashblocks pending-state RPC overrides (`eth_call`, `eth_estimateGas`,
-/// `eth_simulateV1`) when flashblocks are enabled.
-fn install_flashblocks_call_overrides<N, EthApi>(
+/// Installs the flashblocks pending-state and Slipstream RPC overrides.
+fn install_rpc_overrides<N, EthApi>(
     ctx: &mut RpcContext<'_, N, EthApi>,
     flashblocks_enabled: bool,
+    slipstream: &Option<(SlipstreamArgs, SequencerClient)>,
 ) -> eyre::Result<()>
 where
     N: FullNodeComponents,
-    EthApi: FullEthApi + PendingFlashblockState + Clone + Send + Sync + 'static,
+    EthApi: FullEthApi<NetworkTypes = Optimism>
+        + PendingFlashblockState
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     ErrorObject<'static>: From<<EthApi as EthApiTypes>::Error>,
 {
-    if !flashblocks_enabled {
-        return Ok(());
+    if flashblocks_enabled {
+        info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
+        let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
+        ctx.modules.add_or_replace_configured(ext.into_rpc())?;
+        info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
     }
 
-    info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
-    let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
-    ctx.modules.add_or_replace_configured(ext.into_rpc())?;
-    info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+    if let Some((args, client)) = slipstream {
+        let config = SlipstreamConfig {
+            forward_concurrency: args.forward_concurrency,
+            forward_timeout: Duration::from_millis(args.forward_timeout_ms),
+            build_concurrency: args.hint_build_concurrency,
+            build_timeout: Duration::from_millis(args.hint_build_timeout_ms),
+            max_batch_bytes: args.max_hinted_batch_bytes,
+        };
+        let ext = SlipstreamRpcExt::new(
+            client.clone(),
+            ctx.registry.eth_api().clone(),
+            args.compute_hints,
+            config,
+        );
+        ctx.modules.add_or_replace_configured(ext.into_rpc())?;
+        info!(target: "reth::cli", endpoint = client.endpoint(), compute_hints = args.compute_hints, "Slipstream forwarding RPC installed");
+    }
+
     Ok(())
 }
 

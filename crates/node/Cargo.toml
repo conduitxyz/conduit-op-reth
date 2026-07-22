@@ -26,6 +26,8 @@ reth-db.workspace = true
 reth-db-api.workspace = true
 reth-tasks.workspace = true
 reth-rpc-eth-api.workspace = true
+reth-rpc-eth-types.workspace = true
+reth-metrics.workspace = true
 
 alloy-primitives.workspace = true
 alloy-genesis.workspace = true
@@ -36,6 +38,8 @@ alloy-op-evm.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-json-rpc.workspace = true
 op-alloy-consensus.workspace = true
+op-alloy-network.workspace = true
+op-alloy-rpc-types.workspace = true
 op-alloy-rpc-types-engine.workspace = true
 
 revm.workspace = true
@@ -49,9 +53,11 @@ reth-optimism-exex = { workspace = true, features = ["metrics"] }
 reth-optimism-trie = { workspace = true, features = ["metrics"] }
 
 eyre.workspace = true
+clap.workspace = true
 futures-util.workspace = true
 tokio.workspace = true
 jsonrpsee = { workspace = true, features = ["server", "macros", "client"] }
+metrics.workspace = true
 
 [features]
 asm-keccak = [

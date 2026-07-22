@@ -6,6 +6,7 @@ mod version;
 use clap::Parser;
 use commands::ConduitSubCommand;
 use conduit_op_reth_node::{
+    args::ConduitArgs,
     chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser},
     evm::ConduitOpEvmConfig,
     launcher,
@@ -15,7 +16,6 @@ use reth_db::DatabaseEnv;
 use reth_ethereum_cli::Cli;
 use reth_node_builder::{NodeBuilder, WithLaunchContext};
 use reth_optimism_consensus::OpBeaconConsensus;
-use reth_optimism_node::args::RollupArgs;
 use reth_rpc_server_types::DefaultRpcModuleValidator;
 use std::sync::Arc;
 use tracing::info;
@@ -38,7 +38,7 @@ fn main() {
 
     if let Err(err) = Cli::<
         ConduitOpChainSpecParser,
-        RollupArgs,
+        ConduitArgs,
         DefaultRpcModuleValidator,
         ConduitSubCommand,
     >::parse()
@@ -63,7 +63,7 @@ mod tests {
     use super::*;
 
     type ConduitCli =
-        Cli<ConduitOpChainSpecParser, RollupArgs, DefaultRpcModuleValidator, ConduitSubCommand>;
+        Cli<ConduitOpChainSpecParser, ConduitArgs, DefaultRpcModuleValidator, ConduitSubCommand>;
 
     /// Upgrade tripwire for the CLI surface of the upstream `proofs` commands: operators'
     /// runbooks depend on these subcommands and flag names. If an op-reth version bump
