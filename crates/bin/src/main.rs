@@ -28,7 +28,7 @@ struct ConduitRollupArgs {
     #[command(flatten)]
     rollup: RollupArgs,
 
-    /// Route `eth_sendRawTransactionSync` through the configured sequencer's Slipstream API.
+    /// Proxy the public Slipstream batch API to the configured sequencer.
     #[arg(long = "conduit.slipstream")]
     slipstream: bool,
 }
@@ -155,15 +155,13 @@ mod tests {
     }
 
     #[test]
-    fn slipstream_sync_override_flag_parses() {
+    fn slipstream_batch_proxy_flag_parses() {
         let cli = <ConduitCli as clap::Parser>::try_parse_from([
             "conduit-op-reth",
             "node",
             "--conduit.slipstream",
             "--rollup.sequencer",
             "http://sequencer:80",
-            "--flashblocks-url",
-            "ws://flashblocks:1111",
         ])
         .expect("Slipstream node flags must parse");
 

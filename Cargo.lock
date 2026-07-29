@@ -2336,7 +2336,6 @@ dependencies = [
  "alloy-op-evm",
  "alloy-primitives",
  "alloy-rpc-types-eth",
- "alloy-transport",
  "conduit-op-reth-rpc-api",
  "eyre",
  "futures-util",
@@ -2366,7 +2365,6 @@ dependencies = [
  "reth-primitives-traits",
  "reth-revm",
  "reth-rpc-eth-api",
- "reth-rpc-eth-types",
  "reth-tasks",
  "revm",
  "serde",
@@ -2379,7 +2377,6 @@ dependencies = [
 name = "conduit-op-reth-rpc-api"
 version = "2.1.2"
 dependencies = [
- "alloy-json-rpc",
  "alloy-primitives",
  "jsonrpsee",
  "serde",

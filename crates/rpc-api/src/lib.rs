@@ -1,18 +1,15 @@
 //! Shared JSON-RPC contract for Conduit Slipstream clients and servers.
 //!
 //! This crate intentionally contains only wire types and generated RPC traits.
-//! The G3 builder owns mailbox execution, while OP-Reth replicas may use the
-//! same contract as clients when serving `eth_sendRawTransactionSync`.
+//! The G3 builder owns mailbox execution, while OP-Reth replicas use the same
+//! contract to proxy public batch requests to the active builder.
 
-use alloy_json_rpc::RpcObject;
 use alloy_primitives::{Address, B256, Bytes};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
 
 /// Fully-qualified JSON-RPC name of the Slipstream batch method.
 pub const SEND_RAW_TRANSACTION_BATCH_METHOD: &str = "slipstream_sendRawTransactionBatch";
-/// Fully-qualified JSON-RPC name of the standard synchronous transaction method.
-pub const SEND_RAW_TRANSACTION_SYNC_METHOD: &str = "eth_sendRawTransactionSync";
 
 /// A transaction executed into a published flashblock.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -57,16 +54,6 @@ pub trait SlipstreamApi {
     /// execution verdict per input transaction.
     #[method(name = "sendRawTransactionBatch")]
     async fn send_raw_transaction_batch(&self, txs: Vec<Bytes>) -> RpcResult<SlipstreamBatchAck>;
-}
-
-/// One-method adapter used to replace the standard synchronous transaction
-/// implementation without replacing any other `eth` method.
-#[rpc(server, namespace = "eth")]
-pub trait SlipstreamSyncApi<R: RpcObject> {
-    /// Submits one signed transaction through Slipstream and returns its
-    /// authoritative pending or canonical receipt.
-    #[method(name = "sendRawTransactionSync")]
-    async fn send_raw_transaction_sync(&self, tx: Bytes) -> RpcResult<R>;
 }
 
 #[cfg(test)]

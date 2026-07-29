@@ -9,10 +9,9 @@ use crate::{
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     node::ConduitOpNode,
-    slipstream::SlipstreamSyncExt,
+    slipstream::SlipstreamProxy,
 };
-use alloy_json_rpc::RpcObject;
-use conduit_op_reth_rpc_api::{SlipstreamApiServer, SlipstreamSyncApiServer};
+use conduit_op_reth_rpc_api::SlipstreamApiServer;
 use eyre::ErrReport;
 use futures_util::FutureExt;
 use jsonrpsee::types::ErrorObject;
@@ -30,7 +29,7 @@ use reth_optimism_trie::{
     OpProofsStorage, OpProofsStore,
     db::{MdbxProofsStorage, MdbxProofsStorageV2},
 };
-use reth_rpc_eth_api::{EthApiTypes, RpcReceipt, helpers::FullEthApi};
+use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -52,7 +51,7 @@ pub async fn launch_node(
             .extend_rpc_modules(move |mut ctx| {
                 let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
                 install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
-                install_slipstream_rpc_extensions(&mut ctx, slipstream_enabled, sequencer_client)
+                install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)
             })
             .launch_with_debug_capabilities()
             .await?;
@@ -121,11 +120,7 @@ where
         .extend_rpc_modules(move |mut ctx| {
             let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
             install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
-            install_slipstream_rpc_extensions(
-                &mut ctx,
-                slipstream_enabled,
-                sequencer_client,
-            )?;
+            install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
 
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
             let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
@@ -156,10 +151,6 @@ fn validate_slipstream_config(args: &RollupArgs, slipstream_enabled: bool) -> ey
     }
 
     eyre::ensure!(args.sequencer.is_some(), "--conduit.slipstream requires --rollup.sequencer");
-    eyre::ensure!(
-        args.flashblocks_url.is_some(),
-        "--conduit.slipstream requires --flashblocks-url so the replica can obtain pending receipts"
-    );
     Ok(())
 }
 
@@ -185,17 +176,15 @@ where
     Ok(())
 }
 
-/// Proxies the public Slipstream batch API and replaces only
-/// `eth_sendRawTransactionSync` when the replica explicitly opts in.
-fn install_slipstream_rpc_extensions<N, EthApi>(
+/// Proxies the public Slipstream batch API when the replica explicitly opts in.
+fn install_slipstream_batch_proxy<N, EthApi>(
     ctx: &mut RpcContext<'_, N, EthApi>,
     slipstream_enabled: bool,
     sequencer_client: Option<SequencerClient>,
 ) -> eyre::Result<()>
 where
     N: FullNodeComponents,
-    EthApi: FullEthApi + Clone + Send + Sync + 'static,
-    RpcReceipt<EthApi::NetworkTypes>: RpcObject,
+    EthApi: EthApiTypes,
 {
     if !slipstream_enabled {
         return Ok(());
@@ -207,11 +196,10 @@ where
     info!(
         target: "reth::cli",
         endpoint = sequencer_client.endpoint(),
-        "Installing Slipstream batch proxy and eth_sendRawTransactionSync override"
+        "Installing Slipstream batch proxy"
     );
-    let ext = SlipstreamSyncExt::new(ctx.registry.eth_api().clone(), sequencer_client);
-    ctx.modules.add_or_replace_configured(SlipstreamApiServer::into_rpc(ext.clone()))?;
-    ctx.modules.add_or_replace_configured(SlipstreamSyncApiServer::into_rpc(ext))?;
+    let proxy = SlipstreamProxy::new(sequencer_client);
+    ctx.modules.add_or_replace_configured(SlipstreamApiServer::into_rpc(proxy))?;
     Ok(())
 }
 
@@ -247,17 +235,12 @@ mod tests {
     }
 
     #[test]
-    fn slipstream_requires_sequencer_and_flashblocks() {
+    fn slipstream_requires_sequencer() {
         let error = validate_slipstream_config(&RollupArgs::default(), true).unwrap_err();
         assert!(error.to_string().contains("--rollup.sequencer"));
 
         let args =
             RollupArgs { sequencer: Some("http://sequencer:80".to_string()), ..Default::default() };
-        let error = validate_slipstream_config(&args, true).unwrap_err();
-        assert!(error.to_string().contains("--flashblocks-url"));
-
-        let args =
-            RollupArgs { flashblocks_url: Some("ws://flashblocks:1111".parse().unwrap()), ..args };
         validate_slipstream_config(&args, true).unwrap();
     }
 }
