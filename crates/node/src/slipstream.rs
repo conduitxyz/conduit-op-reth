@@ -1,11 +1,11 @@
-//! Optional `eth_sendRawTransactionSync` override for G3 Slipstream deployments.
+//! Optional G3 Slipstream RPC extensions for OP-Reth replicas.
 //!
 //! Public RPC requests reach OP-Reth replicas, while the active op-rbuilder
-//! sequencer owns the Slipstream mailbox. The override therefore submits the
-//! immutable signed bytes to the sequencer's existing
-//! `slipstream_sendRawTransactionBatch` method, then obtains the normal RPC
-//! receipt from this replica's pending-flashblock overlay. The ordinary txpool
-//! is never used by this path.
+//! sequencer owns the Slipstream mailbox. The public batch method is proxied
+//! directly to the configured sequencer. The sync override submits immutable
+//! signed bytes through the same forwarding helper, then obtains the normal
+//! RPC receipt from this replica's pending-flashblock overlay. The ordinary
+//! txpool is never used by the sync path.
 //!
 //! Client cancellation drops the retry/receipt-wait future. An attempt already
 //! accepted by the sequencer may still be included, matching the stock sync
@@ -18,7 +18,8 @@ use alloy_primitives::{B256, Bytes, keccak256};
 use alloy_rpc_types_eth::error::EthRpcErrorCode;
 use alloy_transport::RpcError;
 use conduit_op_reth_rpc_api::{
-    SEND_RAW_TRANSACTION_BATCH_METHOD, SlipstreamBatchAck, SlipstreamSyncApiServer,
+    SEND_RAW_TRANSACTION_BATCH_METHOD, SlipstreamApiServer, SlipstreamBatchAck,
+    SlipstreamSyncApiServer,
 };
 #[cfg(test)]
 use conduit_op_reth_rpc_api::{
@@ -37,10 +38,6 @@ use reth_rpc_eth_types::EthApiError;
 use tracing::warn;
 
 const RETRY_BACKOFF: Duration = Duration::from_millis(10);
-/// An ambiguous network attempt can be included before its HTTP response is
-/// lost. Give the published flashblock time to reach this replica before
-/// treating a duplicate-attempt rejection as final.
-const AMBIGUOUS_REJECTION_RECEIPT_CHECKS: usize = 20;
 
 const INVALID_REQUEST_CODE: i32 = -32600;
 const METHOD_NOT_FOUND_CODE: i32 = -32601;
@@ -107,14 +104,18 @@ fn classify_submit_error(error: SequencerClientError) -> SubmitFailure {
     }
 }
 
+async fn forward_batch_to_slipstream(
+    sequencer_client: &SequencerClient,
+    raw_txs: Vec<Bytes>,
+) -> Result<SlipstreamBatchAck, SequencerClientError> {
+    sequencer_client.request(SEND_RAW_TRANSACTION_BATCH_METHOD, (raw_txs,)).await
+}
+
 async fn submit_to_slipstream(
     sequencer_client: &SequencerClient,
     raw_tx: Bytes,
 ) -> Result<SlipstreamBatchAck, SubmitFailure> {
-    sequencer_client
-        .request(SEND_RAW_TRANSACTION_BATCH_METHOD, (vec![raw_tx],))
-        .await
-        .map_err(classify_submit_error)
+    forward_batch_to_slipstream(sequencer_client, vec![raw_tx]).await.map_err(classify_submit_error)
 }
 
 fn transaction_rejected(reason: String) -> ErrorObjectOwned {
@@ -177,17 +178,16 @@ where
             Ok(ack) => match classify_single_ack(ack) {
                 SingleTxVerdict::Included => included = true,
                 SingleTxVerdict::Rejected(reason) => {
-                    let checks =
-                        if ambiguous_attempt { AMBIGUOUS_REJECTION_RECEIPT_CHECKS } else { 1 };
-                    for check in 0..checks {
-                        if let Some(receipt) = receipt(hash).await? {
-                            return Ok(receipt);
-                        }
-                        if check + 1 < checks {
-                            tokio::time::sleep(RETRY_BACKOFF).await;
-                        }
+                    if ambiguous_attempt {
+                        // A previous attempt may have reached the mailbox and
+                        // lost its response. A later duplicate can then be
+                        // rejected even though the original will be included.
+                        // Stop resubmitting and let the authoritative receipt
+                        // or outer confirmation timeout resolve the ambiguity.
+                        included = true;
+                    } else {
+                        return Err(transaction_rejected(reason));
                     }
-                    return Err(transaction_rejected(reason));
                 }
                 SingleTxVerdict::Retry { ambiguous } => ambiguous_attempt |= ambiguous,
             },
@@ -199,6 +199,19 @@ where
         }
 
         tokio::time::sleep(RETRY_BACKOFF).await;
+    }
+}
+
+#[async_trait]
+impl<Eth> SlipstreamApiServer for SlipstreamSyncExt<Eth>
+where
+    Eth: Send + Sync + 'static,
+{
+    async fn send_raw_transaction_batch(
+        &self,
+        raw_txs: Vec<Bytes>,
+    ) -> RpcResult<SlipstreamBatchAck> {
+        forward_batch_to_slipstream(&self.sequencer_client, raw_txs).await.map_err(Into::into)
     }
 }
 
@@ -390,6 +403,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn ambiguous_duplicate_rejection_waits_for_outer_deadline() {
+        let raw_tx = Bytes::from_static(b"tx");
+        let hash = keccak256(&raw_tx);
+        let outcomes = Arc::new(Mutex::new(VecDeque::from([
+            SlipstreamBatchAck::default(),
+            rejected_ack("nonce-too-low"),
+        ])));
+        let submit_outcomes = outcomes.clone();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let submit_attempts = attempts.clone();
+        let submit = move |_| {
+            submit_attempts.fetch_add(1, Ordering::SeqCst);
+            let ack = submit_outcomes.lock().unwrap().pop_front().unwrap();
+            async move { Ok(ack) }
+        };
+        let receipt = |_| async { Ok(None::<u64>) };
+        let timeout_duration = Duration::from_millis(25);
+
+        let error = with_confirmation_timeout(
+            hash,
+            timeout_duration,
+            submit_single_with_retry(raw_tx, submit, receipt),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code(), EthRpcErrorCode::TransactionConfirmationTimeout.code());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn repeated_retries_stop_at_configured_sync_deadline() {
         let raw_tx = Bytes::from_static(b"tx");
         let hash = keccak256(&raw_tx);
@@ -416,9 +460,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequencer_request_uses_batch_api_and_original_bytes() {
-        let raw_tx = Bytes::from_static(b"signed transaction");
-        let expected = raw_tx.clone();
+    async fn public_batch_api_directly_forwards_and_returns_sequencer_ack() {
+        let raw_txs = vec![
+            Bytes::from_static(b"signed transaction 1"),
+            Bytes::from_static(b"signed transaction 2"),
+        ];
+        let expected = raw_txs.clone();
         let calls = Arc::new(AtomicUsize::new(0));
         let server_calls = calls.clone();
         let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
@@ -430,7 +477,7 @@ mod tests {
                 let server_calls = server_calls.clone();
                 async move {
                     let (received,): (Vec<Bytes>,) = params.parse()?;
-                    assert_eq!(received, vec![expected]);
+                    assert_eq!(received, expected);
                     server_calls.fetch_add(1, Ordering::SeqCst);
                     Ok::<_, ErrorObjectOwned>(included_ack())
                 }
@@ -438,8 +485,9 @@ mod tests {
             .unwrap();
         let handle = server.start(module);
         let client = SequencerClient::new(format!("http://{address}")).await.unwrap();
+        let ext = SlipstreamSyncExt::new((), client);
 
-        let ack = submit_to_slipstream(&client, raw_tx).await.unwrap();
+        let ack = SlipstreamApiServer::send_raw_transaction_batch(&ext, raw_txs).await.unwrap();
 
         assert!(matches!(classify_single_ack(ack), SingleTxVerdict::Included));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -467,6 +515,16 @@ mod tests {
     struct TestRpc;
 
     #[async_trait]
+    impl SlipstreamApiServer for TestRpc {
+        async fn send_raw_transaction_batch(
+            &self,
+            _txs: Vec<Bytes>,
+        ) -> RpcResult<SlipstreamBatchAck> {
+            Ok(SlipstreamBatchAck::default())
+        }
+    }
+
+    #[async_trait]
     impl SlipstreamSyncApiServer<u64> for TestRpc {
         async fn send_raw_transaction_sync(&self, _tx: Bytes) -> RpcResult<u64> {
             Ok(1)
@@ -474,11 +532,19 @@ mod tests {
     }
 
     #[test]
-    fn rpc_extension_replaces_only_send_raw_transaction_sync() {
-        let module = SlipstreamSyncApiServer::into_rpc(TestRpc);
+    fn rpc_extensions_expose_batch_and_replace_only_send_raw_transaction_sync() {
+        let mut module = SlipstreamApiServer::into_rpc(TestRpc);
+        module.merge(SlipstreamSyncApiServer::into_rpc(TestRpc)).unwrap();
 
-        assert_eq!(module.method_names().collect::<Vec<_>>(), [SEND_RAW_TRANSACTION_SYNC_METHOD]);
+        let method_names = module.method_names().collect::<Vec<_>>();
+        assert_eq!(
+            method_names,
+            [SEND_RAW_TRANSACTION_BATCH_METHOD, SEND_RAW_TRANSACTION_SYNC_METHOD]
+        );
         assert!(!module.method_names().any(|name| name == "eth_sendRawTransaction"));
-        assert!(!module.method_names().any(|name| name == SEND_RAW_TRANSACTION_BATCH_METHOD));
+        assert_eq!(
+            module.method_names().filter(|name| *name == SEND_RAW_TRANSACTION_SYNC_METHOD).count(),
+            1
+        );
     }
 }

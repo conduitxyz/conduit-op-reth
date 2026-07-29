@@ -12,7 +12,7 @@ use crate::{
     slipstream::SlipstreamSyncExt,
 };
 use alloy_json_rpc::RpcObject;
-use conduit_op_reth_rpc_api::SlipstreamSyncApiServer;
+use conduit_op_reth_rpc_api::{SlipstreamApiServer, SlipstreamSyncApiServer};
 use eyre::ErrReport;
 use futures_util::FutureExt;
 use jsonrpsee::types::ErrorObject;
@@ -52,7 +52,7 @@ pub async fn launch_node(
             .extend_rpc_modules(move |mut ctx| {
                 let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
                 install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
-                install_slipstream_sync_override(&mut ctx, slipstream_enabled, sequencer_client)
+                install_slipstream_rpc_extensions(&mut ctx, slipstream_enabled, sequencer_client)
             })
             .launch_with_debug_capabilities()
             .await?;
@@ -121,7 +121,7 @@ where
         .extend_rpc_modules(move |mut ctx| {
             let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
             install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
-            install_slipstream_sync_override(
+            install_slipstream_rpc_extensions(
                 &mut ctx,
                 slipstream_enabled,
                 sequencer_client,
@@ -185,9 +185,9 @@ where
     Ok(())
 }
 
-/// Replaces only `eth_sendRawTransactionSync` when the replica explicitly
-/// opts into Slipstream submission.
-fn install_slipstream_sync_override<N, EthApi>(
+/// Proxies the public Slipstream batch API and replaces only
+/// `eth_sendRawTransactionSync` when the replica explicitly opts in.
+fn install_slipstream_rpc_extensions<N, EthApi>(
     ctx: &mut RpcContext<'_, N, EthApi>,
     slipstream_enabled: bool,
     sequencer_client: Option<SequencerClient>,
@@ -207,9 +207,10 @@ where
     info!(
         target: "reth::cli",
         endpoint = sequencer_client.endpoint(),
-        "Installing Slipstream eth_sendRawTransactionSync override"
+        "Installing Slipstream batch proxy and eth_sendRawTransactionSync override"
     );
     let ext = SlipstreamSyncExt::new(ctx.registry.eth_api().clone(), sequencer_client);
+    ctx.modules.add_or_replace_configured(SlipstreamApiServer::into_rpc(ext.clone()))?;
     ctx.modules.add_or_replace_configured(SlipstreamSyncApiServer::into_rpc(ext))?;
     Ok(())
 }
