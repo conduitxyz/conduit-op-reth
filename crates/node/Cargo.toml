@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+conduit-op-reth-rpc-api.workspace = true
 reth-optimism-chainspec = { workspace = true, features = ["superchain-configs"] }
 reth-optimism-forks.workspace = true
 reth-optimism-evm.workspace = true
@@ -26,6 +27,7 @@ reth-db.workspace = true
 reth-db-api.workspace = true
 reth-tasks.workspace = true
 reth-rpc-eth-api.workspace = true
+reth-rpc-eth-types.workspace = true
 
 alloy-primitives.workspace = true
 alloy-genesis.workspace = true
@@ -35,6 +37,7 @@ alloy-evm.workspace = true
 alloy-op-evm.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-json-rpc.workspace = true
+alloy-transport.workspace = true
 op-alloy-consensus.workspace = true
 op-alloy-rpc-types-engine.workspace = true
 

@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 # Internal
 conduit-op-reth-node = { path = "crates/node" }
+conduit-op-reth-rpc-api = { path = "crates/rpc-api" }
 
 # Reth (paradigmxyz/reth @ op-reth/v2.4.0 workspace tag)
 reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
@@ -59,6 +60,7 @@ alloy-sol-macro = "1.6.0"
 alloy-sol-types = "1.6.0"
 alloy-rpc-types-eth = "2.0.5"
 alloy-json-rpc = "2.0.5"
+alloy-transport = "2.0.5"
 op-alloy-consensus = "2.0.0"
 op-alloy-rpc-types-engine = "2.0.0"
 
@@ -73,8 +75,9 @@ reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "
 reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
+reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
 reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 
 alloy-rpc-types-engine = "2.0.5"
 alloy-signer-local = "2.0.5"

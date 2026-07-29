@@ -9,7 +9,10 @@ use crate::{
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     node::ConduitOpNode,
+    slipstream::SlipstreamSyncExt,
 };
+use alloy_json_rpc::RpcObject;
+use conduit_op_reth_rpc_api::SlipstreamSyncApiServer;
 use eyre::ErrReport;
 use futures_util::FutureExt;
 use jsonrpsee::types::ErrorObject;
@@ -19,6 +22,7 @@ use reth_node_builder::{FullNodeComponents, NodeBuilder, WithLaunchContext, rpc:
 use reth_optimism_exex::OpProofsExEx;
 use reth_optimism_node::args::{ProofsStorageVersion, RollupArgs};
 use reth_optimism_rpc::{
+    SequencerClient,
     debug::{DebugApiExt, DebugApiOverrideServer},
     eth::proofs::{EthApiExt, EthApiOverrideServer},
 };
@@ -26,7 +30,7 @@ use reth_optimism_trie::{
     OpProofsStorage, OpProofsStore,
     db::{MdbxProofsStorage, MdbxProofsStorageV2},
 };
-use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
+use reth_rpc_eth_api::{EthApiTypes, RpcReceipt, helpers::FullEthApi};
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -37,13 +41,18 @@ use tracing::info;
 pub async fn launch_node(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
     args: RollupArgs,
+    slipstream_enabled: bool,
 ) -> eyre::Result<(), ErrReport> {
+    validate_slipstream_config(&args, slipstream_enabled)?;
+
     if !args.proofs_history {
         let flashblocks_enabled = args.flashblocks_url.is_some();
         let handle = builder
             .node(ConduitOpNode::new(args))
             .extend_rpc_modules(move |mut ctx| {
-                install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)
+                let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
+                install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+                install_slipstream_sync_override(&mut ctx, slipstream_enabled, sequencer_client)
             })
             .launch_with_debug_capabilities()
             .await?;
@@ -60,7 +69,7 @@ pub async fn launch_node(
                 MdbxProofsStorage::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorage: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx).await
+            launch_with_proof_history(builder, args, mdbx, slipstream_enabled).await
         }
         ProofsStorageVersion::V2 => {
             info!(target: "reth::cli", "Using on-disk storage for proofs history (v2)");
@@ -68,7 +77,7 @@ pub async fn launch_node(
                 MdbxProofsStorageV2::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorageV2: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx).await
+            launch_with_proof_history(builder, args, mdbx, slipstream_enabled).await
         }
     }
 }
@@ -78,6 +87,7 @@ async fn launch_with_proof_history<S>(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
     args: RollupArgs,
     mdbx: Arc<S>,
+    slipstream_enabled: bool,
 ) -> eyre::Result<(), ErrReport>
 where
     S: OpProofsStore + DatabaseMetrics + Send + Sync + 'static,
@@ -109,7 +119,13 @@ where
                 .boxed())
         })
         .extend_rpc_modules(move |mut ctx| {
+            let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
             install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+            install_slipstream_sync_override(
+                &mut ctx,
+                slipstream_enabled,
+                sequencer_client,
+            )?;
 
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
             let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
@@ -134,6 +150,19 @@ where
     handle.node_exit_future.await
 }
 
+fn validate_slipstream_config(args: &RollupArgs, slipstream_enabled: bool) -> eyre::Result<()> {
+    if !slipstream_enabled {
+        return Ok(());
+    }
+
+    eyre::ensure!(args.sequencer.is_some(), "--conduit.slipstream requires --rollup.sequencer");
+    eyre::ensure!(
+        args.flashblocks_url.is_some(),
+        "--conduit.slipstream requires --flashblocks-url so the replica can obtain pending receipts"
+    );
+    Ok(())
+}
+
 /// Installs the flashblocks pending-state RPC overrides (`eth_call`, `eth_estimateGas`,
 /// `eth_simulateV1`) when flashblocks are enabled.
 fn install_flashblocks_call_overrides<N, EthApi>(
@@ -153,6 +182,35 @@ where
     let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
     ctx.modules.add_or_replace_configured(ext.into_rpc())?;
     info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+    Ok(())
+}
+
+/// Replaces only `eth_sendRawTransactionSync` when the replica explicitly
+/// opts into Slipstream submission.
+fn install_slipstream_sync_override<N, EthApi>(
+    ctx: &mut RpcContext<'_, N, EthApi>,
+    slipstream_enabled: bool,
+    sequencer_client: Option<SequencerClient>,
+) -> eyre::Result<()>
+where
+    N: FullNodeComponents,
+    EthApi: FullEthApi + Clone + Send + Sync + 'static,
+    RpcReceipt<EthApi::NetworkTypes>: RpcObject,
+{
+    if !slipstream_enabled {
+        return Ok(());
+    }
+
+    let sequencer_client = sequencer_client.ok_or_else(|| {
+        eyre::eyre!("Slipstream enabled but the eth API has no configured sequencer client")
+    })?;
+    info!(
+        target: "reth::cli",
+        endpoint = sequencer_client.endpoint(),
+        "Installing Slipstream eth_sendRawTransactionSync override"
+    );
+    let ext = SlipstreamSyncExt::new(ctx.registry.eth_api().clone(), sequencer_client);
+    ctx.modules.add_or_replace_configured(SlipstreamSyncApiServer::into_rpc(ext))?;
     Ok(())
 }
 
@@ -176,4 +234,29 @@ fn spawn_proofs_db_metrics<S>(
             storage.report_metrics();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slipstream_config_is_optional() {
+        validate_slipstream_config(&RollupArgs::default(), false).unwrap();
+    }
+
+    #[test]
+    fn slipstream_requires_sequencer_and_flashblocks() {
+        let error = validate_slipstream_config(&RollupArgs::default(), true).unwrap_err();
+        assert!(error.to_string().contains("--rollup.sequencer"));
+
+        let args =
+            RollupArgs { sequencer: Some("http://sequencer:80".to_string()), ..Default::default() };
+        let error = validate_slipstream_config(&args, true).unwrap_err();
+        assert!(error.to_string().contains("--flashblocks-url"));
+
+        let args =
+            RollupArgs { flashblocks_url: Some("ws://flashblocks:1111".parse().unwrap()), ..args };
+        validate_slipstream_config(&args, true).unwrap();
+    }
 }
