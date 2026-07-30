@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 # Internal
 conduit-op-reth-node = { path = "crates/node" }
+conduit-op-reth-rpc-api = { path = "crates/rpc-api" }
 
 # Reth (paradigmxyz/reth @ op-reth/v2.4.0 workspace tag)
 reth-ethereum-cli = { git = "https://github.com/paradigmxyz/reth", tag = "v2.3.0" }

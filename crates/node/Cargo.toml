@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+conduit-op-reth-rpc-api.workspace = true
 reth-optimism-chainspec = { workspace = true, features = ["superchain-configs"] }
 reth-optimism-forks.workspace = true
 reth-optimism-evm.workspace = true

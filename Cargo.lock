@@ -2336,6 +2336,7 @@ dependencies = [
  "alloy-op-evm",
  "alloy-primitives",
  "alloy-rpc-types-eth",
+ "conduit-op-reth-rpc-api",
  "eyre",
  "futures-util",
  "jsonrpsee",
@@ -2370,6 +2371,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "conduit-op-reth-rpc-api"
+version = "2.1.2"
+dependencies = [
+ "alloy-primitives",
+ "jsonrpsee",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

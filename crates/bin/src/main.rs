@@ -21,6 +21,18 @@ use std::sync::Arc;
 use tracing::info;
 use version::init_conduit_version;
 
+/// Conduit-specific node arguments layered on the upstream OP-Reth rollup arguments.
+#[derive(Debug, Clone, clap::Args)]
+struct ConduitRollupArgs {
+    /// Standard OP-Reth rollup configuration.
+    #[command(flatten)]
+    rollup: RollupArgs,
+
+    /// Proxy the public Slipstream batch API to the configured sequencer.
+    #[arg(long = "conduit.slipstream")]
+    slipstream: bool,
+}
+
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
@@ -38,21 +50,20 @@ fn main() {
 
     if let Err(err) = Cli::<
         ConduitOpChainSpecParser,
-        RollupArgs,
+        ConduitRollupArgs,
         DefaultRpcModuleValidator,
         ConduitSubCommand,
     >::parse()
-        .run_with_components::<ConduitOpNode>(
-            |spec: Arc<ConduitOpChainSpec>| {
-                (ConduitOpEvmConfig::new(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
-            },
-            |builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
-             rollup_args| async move {
-                info!(target: "reth::cli", "Launching conduit-op-reth node");
-                launcher::launch_node(builder, rollup_args).await
-            },
-        )
-    {
+    .run_with_components::<ConduitOpNode>(
+        |spec: Arc<ConduitOpChainSpec>| {
+            (ConduitOpEvmConfig::new(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
+        },
+        |builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
+         args: ConduitRollupArgs| async move {
+            info!(target: "reth::cli", "Launching conduit-op-reth node");
+            launcher::launch_node(builder, args.rollup, args.slipstream).await
+        },
+    ) {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
     }
@@ -62,8 +73,12 @@ fn main() {
 mod tests {
     use super::*;
 
-    type ConduitCli =
-        Cli<ConduitOpChainSpecParser, RollupArgs, DefaultRpcModuleValidator, ConduitSubCommand>;
+    type ConduitCli = Cli<
+        ConduitOpChainSpecParser,
+        ConduitRollupArgs,
+        DefaultRpcModuleValidator,
+        ConduitSubCommand,
+    >;
 
     /// Upgrade tripwire for the CLI surface of the upstream `proofs` commands: operators'
     /// runbooks depend on these subcommands and flag names. If an op-reth version bump
@@ -137,5 +152,22 @@ mod tests {
         ];
         <ConduitCli as clap::Parser>::try_parse_from(node_args)
             .expect("node proofs-history flags must parse");
+    }
+
+    #[test]
+    fn slipstream_batch_proxy_flag_parses() {
+        let cli = <ConduitCli as clap::Parser>::try_parse_from([
+            "conduit-op-reth",
+            "node",
+            "--conduit.slipstream",
+            "--rollup.sequencer",
+            "http://sequencer:80",
+        ])
+        .expect("Slipstream node flags must parse");
+
+        let reth_ethereum_cli::Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+        assert!(command.ext.slipstream);
     }
 }
