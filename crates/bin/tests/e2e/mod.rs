@@ -23,10 +23,11 @@ pub const PREFUND_BALANCE_U256: alloy_primitives::U256 =
 /// Each `advance_block()` increments by 1.
 const INITIAL_PAYLOAD_TIMESTAMP: u64 = 1710338135;
 
-/// Fork activation timestamp.
+/// Fork activation timestamp. The e2e harness builds blocks 1 second apart, so the
+/// injected genesis sets `blockTimeAtFork: 1` and the transition window is:
 /// - Block 1: t=INITIAL+1 -> fork not active
-/// - Block 2: t=INITIAL+2 -> fork active, NOT active at t-2 -> applies override
-/// - Block 3: t=INITIAL+3 -> fork active AND active at t-2 -> no-op
+/// - Block 2: t=INITIAL+2 -> fork active, NOT active at t-1 -> applies override
+/// - Block 3: t=INITIAL+3 -> fork active AND active at t-1 -> no-op
 pub const FORK_ACTIVATION_TIMESTAMP: u64 = INITIAL_PAYLOAD_TIMESTAMP + 2;
 
 pub(crate) const BASE_GENESIS: &str =
@@ -81,6 +82,8 @@ pub fn build_genesis_with_override(
     genesis["config"]["conduit"] = serde_json::json!({
         "stateOverrideFork0": {
             "time": fork_time,
+            // The e2e payload builder advances timestamps by 1s per block.
+            "blockTimeAtFork": 1,
             "updates": updates
         }
     });

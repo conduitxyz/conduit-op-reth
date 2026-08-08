@@ -25,8 +25,11 @@ use tracing::info;
 /// storage overrides with a `code` field, or target an address that already has a non-empty
 /// account (balance, nonce, or code).
 ///
-/// Uses the OP Stack 2-second block time heuristic (matching Canyon's `ensure_create2_deployer`)
-/// to detect the transition block without requiring the parent block's timestamp.
+/// Uses the chain's configured block time at fork activation (following the same pattern
+/// as Canyon's `ensure_create2_deployer` and its 2s heuristic) to detect the transition
+/// block without requiring the parent block's timestamp. This relies on blocks around the
+/// activation timestamp being spaced exactly `config.block_time_at_fork` seconds apart;
+/// the chain's block time may change at other points in its history.
 pub fn ensure_state_override_fork0<DB>(
     chain_spec: &impl ConduitOpHardforks,
     timestamp: u64,
@@ -37,10 +40,12 @@ where
     DB: Database + DatabaseCommit,
 {
     // If the fork is active at the current timestamp but was not active at the previous block
-    // timestamp (heuristically, OP Stack block time is 2s), then we are at the transition block.
-    // TODO(rezmah): review whether 2s heuristic is appropriate for all target chains
+    // timestamp (current timestamp minus the chain's block time at fork activation), then we
+    // are at the transition block.
     if !chain_spec.is_state_override_fork0_active_at_timestamp(timestamp) ||
-        chain_spec.is_state_override_fork0_active_at_timestamp(timestamp.saturating_sub(2))
+        chain_spec.is_state_override_fork0_active_at_timestamp(
+            timestamp.saturating_sub(config.block_time_at_fork),
+        )
     {
         return Ok(());
     }
@@ -123,7 +128,7 @@ mod tests {
                 storage: None,
             },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { updates, block_time_at_fork: 2 }
     }
 
     fn storage_only_config() -> StateOverrideFork0Config {
@@ -134,7 +139,7 @@ mod tests {
             Address::with_last_byte(0x99),
             StateOverrideAccount { code: None, storage: Some(storage) },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { updates, block_time_at_fork: 2 }
     }
 
     fn mixed_config() -> StateOverrideFork0Config {
@@ -148,7 +153,7 @@ mod tests {
                 storage: Some(storage),
             },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { updates, block_time_at_fork: 2 }
     }
 
     /// Core happy-path: bytecode injected at exact transition timestamp.
@@ -211,6 +216,36 @@ mod tests {
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply after transition block");
+    }
+
+    /// On a 1s block-time chain, the override applies at the transition block and
+    /// not at the next block (timestamp + 1), which the old hardcoded 2s window
+    /// would have incorrectly re-applied.
+    #[test]
+    fn one_second_block_time_at_fork_applies_exactly_once() {
+        let spec = MockSpec { fork_time: Some(1000) };
+        let config = StateOverrideFork0Config { block_time_at_fork: 1, ..bytecode_config() };
+
+        let mut db = InMemoryDB::default();
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        assert!(
+            db.basic_ref(Address::with_last_byte(0x42)).unwrap().is_some(),
+            "should apply at transition block"
+        );
+
+        let mut db = InMemoryDB::default();
+        ensure_state_override_fork0(&spec, 1001, &config, &mut db).unwrap();
+        assert!(
+            db.basic_ref(Address::with_last_byte(0x42)).unwrap().is_none(),
+            "should not re-apply one block after transition on a 1s chain"
+        );
+
+        let mut db = InMemoryDB::default();
+        ensure_state_override_fork0(&spec, 999, &config, &mut db).unwrap();
+        assert!(
+            db.basic_ref(Address::with_last_byte(0x42)).unwrap().is_none(),
+            "should not apply before activation"
+        );
     }
 
     #[test]

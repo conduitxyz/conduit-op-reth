@@ -61,7 +61,7 @@ pub const fn conduit_evm_limits() -> EvmLimitParams {
 /// Custom block executor wrapping [`OpBlockExecutor`].
 ///
 /// Applies account state overrides when `StateOverrideFork0` first activates,
-/// using the OP Stack 2-second block time heuristic to detect the transition block.
+/// using the chain's configured block time at fork activation to detect the transition block.
 pub struct ConduitOpBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     inner: OpBlockExecutor<E, R, Spec>,
     chain_spec: Arc<ConduitOpChainSpec>,
