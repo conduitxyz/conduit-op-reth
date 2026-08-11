@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 pub mod genesis_validation_test;
 pub mod proofs_history_test;
+pub mod remove_tx_gas_limit_test;
 pub mod state_override_test;
 
 /// Solidity contract preamble: PUSH1 0x80 PUSH1 0x40 MSTORE.
@@ -125,7 +126,8 @@ fn test_node_config(chain_spec: Arc<ConduitOpChainSpec>) -> NodeConfig<ConduitOp
 /// Must be a macro: `NodeBuilder::launch()` returns an unnameable `impl` type.
 /// The returned `Runtime` must be held alive for the test duration.
 macro_rules! launch_test_node {
-    ($chain_spec:expr) => {{
+    ($chain_spec:expr) => {{ crate::e2e::launch_test_node!($chain_spec, crate::e2e::op_payload_attributes) }};
+    ($chain_spec:expr, $attributes_generator:expr) => {{
         use reth_e2e_test_utils::node::NodeTestContext;
         use reth_node_builder::{NodeBuilder, NodeHandle};
         use reth_tasks::Runtime as TaskRuntime;
@@ -138,7 +140,7 @@ macro_rules! launch_test_node {
             .launch()
             .await?;
 
-        let ctx = NodeTestContext::new(node, crate::e2e::op_payload_attributes).await?;
+        let ctx = NodeTestContext::new(node, $attributes_generator).await?;
         (tasks, ctx)
     }};
 }
