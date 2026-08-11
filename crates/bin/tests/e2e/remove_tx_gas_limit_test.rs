@@ -2,7 +2,7 @@ use crate::e2e::{
     BASE_GENESIS, FORK_ACTIVATION_TIMESTAMP, advance, launch_test_node, op_payload_attributes,
     parse_chain_spec,
 };
-use alloy_consensus::Transaction;
+use alloy_consensus::{Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
 use alloy_primitives::{Bytes, TxKind, U256, address};
 use alloy_rpc_types_eth::TransactionRequest;
@@ -10,6 +10,7 @@ use alloy_signer_local::PrivateKeySigner;
 use reth_chainspec::EthChainSpec;
 use reth_e2e_test_utils::transaction::TransactionTestContext;
 use reth_provider::StateProviderFactory;
+use reth_rpc_eth_api::helpers::EthTransactions;
 use reth_storage_api::AccountReader;
 
 const TX_GAS_LIMIT: u64 = 500_000_000;
@@ -23,7 +24,10 @@ fn high_gas_limit_payload_attributes(
     attributes
 }
 
-fn remove_tx_gas_limit_genesis(sender: alloy_primitives::Address) -> String {
+fn remove_tx_gas_limit_genesis(
+    sender: alloy_primitives::Address,
+    gas_burner: alloy_primitives::Address,
+) -> String {
     let mut genesis: serde_json::Value =
         serde_json::from_str(BASE_GENESIS).expect("failed to parse base genesis");
 
@@ -38,8 +42,20 @@ fn remove_tx_gas_limit_genesis(sender: alloy_primitives::Address) -> String {
     genesis["config"]["conduit"] = serde_json::json!({
         "removeTxGasLimitFork0": { "time": FORK_ACTIVATION_TIMESTAMP }
     });
+
+    // Expand memory to 503,655 words, hash all 16,116,960 bytes, then execute 49
+    // one-gas JUMPDESTs. Including intrinsic and opcode gas, this consumes exactly 500M gas.
+    let mut gas_burner_runtime =
+        vec![0x5f, 0x62, 0xf5, 0xec, 0xc0, 0x52, 0x62, 0xf5, 0xec, 0xe0, 0x5f, 0x20];
+    gas_burner_runtime.extend([0x5b; 49]);
+    gas_burner_runtime.push(0x00);
+
     genesis["alloc"][format!("{sender}")] = serde_json::json!({
         "balance": "0xde0b6b3a7640000"
+    });
+    genesis["alloc"][format!("{gas_burner}")] = serde_json::json!({
+        "balance": "0x0",
+        "code": Bytes::from(gas_burner_runtime)
     });
 
     serde_json::to_string(&genesis).unwrap()
@@ -53,15 +69,15 @@ async fn test_500m_gas_transaction_after_remove_tx_gas_limit_fork() -> eyre::Res
 
     let signer: PrivateKeySigner =
         "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse()?;
-    let recipient = address!("5000000000000000000000000000000000000000");
-    let chain_spec = parse_chain_spec(&remove_tx_gas_limit_genesis(signer.address()));
+    let gas_burner = address!("5000000000000000000000000000000000000000");
+    let chain_spec = parse_chain_spec(&remove_tx_gas_limit_genesis(signer.address(), gas_burner));
     let (_tasks, mut ctx) =
         launch_test_node!(chain_spec.clone(), high_gas_limit_payload_attributes);
 
     let tx = TransactionRequest {
         chain_id: Some(chain_spec.chain_id()),
         nonce: Some(0),
-        to: Some(TxKind::Call(recipient)),
+        to: Some(TxKind::Call(gas_burner)),
         value: Some(U256::from(1)),
         gas: Some(TX_GAS_LIMIT),
         max_fee_per_gas: Some(1_000_000_000),
@@ -93,11 +109,21 @@ async fn test_500m_gas_transaction_after_remove_tx_gas_limit_fork() -> eyre::Res
         .expect("500M-gas transaction should be included after custom fork");
     assert_eq!(included.gas_limit(), TX_GAS_LIMIT);
 
+    let receipt = ctx
+        .rpc
+        .inner
+        .eth_api()
+        .transaction_receipt(tx_hash)
+        .await?
+        .expect("500M-gas transaction should have a receipt");
+    assert!(receipt.inner.inner.status(), "gas burner execution should succeed");
+    assert_eq!(receipt.inner.gas_used, TX_GAS_LIMIT);
+
     let state = ctx.inner.provider.latest()?;
     assert_eq!(
-        state.basic_account(&recipient)?.expect("recipient should be created").balance,
+        state.basic_account(&gas_burner)?.expect("gas burner should exist").balance,
         U256::from(1),
-        "value transfer proves the 500M-gas transaction executed successfully"
+        "value transfer proves the gas-burning call completed successfully"
     );
 
     Ok(())
