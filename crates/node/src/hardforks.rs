@@ -6,6 +6,8 @@ hardfork!(
     ConduitOpHardfork {
         /// Applies account state overrides (bytecode, storage) upon activation.
         StateOverrideFork0,
+        /// Removes the EIP-7825 per-transaction gas limit cap while preserving Karst semantics.
+        RemoveTxGasLimitFork0,
     }
 );
 
@@ -20,6 +22,12 @@ pub trait ConduitOpHardforks: OpHardforks {
     /// Checks if StateOverrideFork0 is active at the given timestamp.
     fn is_state_override_fork0_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0)
+            .active_at_timestamp(timestamp)
+    }
+
+    /// Checks if RemoveTxGasLimitFork0 is active at the given timestamp.
+    fn is_remove_tx_gas_limit_fork0_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.conduit_op_fork_activation(ConduitOpHardfork::RemoveTxGasLimitFork0)
             .active_at_timestamp(timestamp)
     }
 }
