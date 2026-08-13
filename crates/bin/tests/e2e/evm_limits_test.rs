@@ -7,20 +7,26 @@ use alloy_eips::Encodable2718;
 use alloy_primitives::{Bytes, TxKind, U256, address};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolConstructor};
 use conduit_op_reth_node::hardforks::ConduitOpHardforks;
 use reth_chainspec::EthChainSpec;
 use reth_e2e_test_utils::transaction::TransactionTestContext;
 use reth_optimism_chainspec::OpHardforks;
 use reth_provider::StateProviderFactory;
 use reth_rpc_eth_api::helpers::EthTransactions;
-use reth_storage_api::AccountReader;
+use reth_storage_api::{AccountReader, StateProvider};
+use revm::primitives::{eip170::MAX_CODE_SIZE, eip3860::MAX_INITCODE_SIZE};
 
 const TX_GAS_LIMIT: u64 = 500_000_000;
 const BLOCK_GAS_LIMIT: u64 = 1_000_000_000;
 const GAS_BURNER_MEMORY_BYTES: u64 = 16_000_000;
 const GAS_BURNER_RESERVE: u64 = 10_000;
 const MIN_EXPECTED_GAS_USED: u64 = TX_GAS_LIMIT - GAS_BURNER_RESERVE;
+const LARGE_CONTRACT_SIZE: usize = MAX_INITCODE_SIZE + 1_024;
+const CUSTOM_CODE_SIZE_LIMIT: usize = LARGE_CONTRACT_SIZE;
+const CUSTOM_INITCODE_SIZE_LIMIT: usize = LARGE_CONTRACT_SIZE + 10_000;
+const CONTRACT_DEPLOYMENT_GAS_LIMIT: u64 = 15_000_000;
+const _: () = assert!(LARGE_CONTRACT_SIZE > MAX_CODE_SIZE);
 // Leave one block to initialize the txpool's tracked block gas limit, then one block to execute
 // the pre-Karst transaction.
 const KARST_ACTIVATION_TIMESTAMP: u64 = FORK_ACTIVATION_TIMESTAMP + 1;
@@ -28,6 +34,7 @@ const EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP: u64 = KARST_ACTIVATION_TIMESTAMP + 
 const PRE_KARST_EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP: u64 = FORK_ACTIVATION_TIMESTAMP - 1;
 
 alloy_sol_macro::sol!("tests/e2e/contracts/GasBurner.sol");
+alloy_sol_macro::sol!("tests/e2e/contracts/LargeContract.sol");
 
 fn high_gas_limit_payload_attributes(
     timestamp: u64,
@@ -41,6 +48,7 @@ fn evm_limits_genesis(
     sender: alloy_primitives::Address,
     gas_burner: alloy_primitives::Address,
     evm_limits_fork0_time: u64,
+    mut limits: serde_json::Value,
 ) -> String {
     let mut genesis: serde_json::Value =
         serde_json::from_str(BASE_GENESIS).expect("failed to parse base genesis");
@@ -53,12 +61,8 @@ fn evm_limits_genesis(
     genesis["gasLimit"] = serde_json::json!(format!("0x{BLOCK_GAS_LIMIT:x}"));
     genesis["baseFeePerGas"] = serde_json::json!("0x1");
     genesis["config"]["karstTime"] = serde_json::json!(KARST_ACTIVATION_TIMESTAMP);
-    genesis["config"]["conduit"] = serde_json::json!({
-        "evmLimitsFork0": {
-            "time": evm_limits_fork0_time,
-            "txGasLimitCap": u64::MAX
-        }
-    });
+    limits["time"] = serde_json::json!(evm_limits_fork0_time);
+    genesis["config"]["conduit"] = serde_json::json!({ "evmLimitsFork0": limits });
     let artifact: serde_json::Value =
         serde_json::from_str(include_str!("contracts/GasBurner.json"))
             .expect("failed to parse gas burner artifact");
@@ -101,6 +105,20 @@ fn gas_burner_transaction(
     }
 }
 
+fn large_contract_initcode() -> Bytes {
+    let artifact: serde_json::Value =
+        serde_json::from_str(include_str!("contracts/LargeContract.json"))
+            .expect("failed to parse large contract artifact");
+    let creation_code: Bytes = serde_json::from_value(artifact["bytecode"]["object"].clone())
+        .expect("large contract artifact should contain creation bytecode");
+    let constructor =
+        LargeContract::constructorCall { runtimeCode: Bytes::from(vec![0; LARGE_CONTRACT_SIZE]) };
+
+    let mut initcode = creation_code.to_vec();
+    initcode.extend(constructor.abi_encode());
+    Bytes::from(initcode)
+}
+
 /// Proves the full RPC -> txpool -> payload builder -> execution path accepts and executes a
 /// 500M-gas transaction before Karst, rejects one under Karst's EIP-7825 cap, then accepts and
 /// executes it again after the custom fork.
@@ -115,6 +133,7 @@ async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> 
         signer.address(),
         gas_burner,
         EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP,
+        serde_json::json!({ "txGasLimitCap": u64::MAX }),
     ));
     let (_tasks, mut ctx) =
         launch_test_node!(chain_spec.clone(), high_gas_limit_payload_attributes);
@@ -221,6 +240,7 @@ async fn test_500m_tx_gas_cap_override_persists_through_karst() -> eyre::Result<
         signer.address(),
         gas_burner,
         PRE_KARST_EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP,
+        serde_json::json!({ "txGasLimitCap": u64::MAX }),
     ));
     let (_tasks, mut ctx) =
         launch_test_node!(chain_spec.clone(), high_gas_limit_payload_attributes);
@@ -307,6 +327,88 @@ async fn test_500m_tx_gas_cap_override_persists_through_karst() -> eyre::Result<
         U256::from(2),
         "both value transfers prove the pre-Karst and post-Karst calls completed successfully"
     );
+
+    Ok(())
+}
+
+/// Proves EvmLimitsFork0 updates both txpool initcode validation and REVM's deployed contract-size
+/// validation by deploying one contract that exceeds both protocol defaults.
+#[tokio::test]
+async fn test_oversized_initcode_and_contract_after_evm_limits_fork() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let signer: PrivateKeySigner =
+        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse()?;
+    let gas_burner = address!("5000000000000000000000000000000000000000");
+    let chain_spec = parse_chain_spec(&evm_limits_genesis(
+        signer.address(),
+        gas_burner,
+        PRE_KARST_EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP,
+        serde_json::json!({
+            "maxCodeSize": CUSTOM_CODE_SIZE_LIMIT,
+            "maxInitcodeSize": CUSTOM_INITCODE_SIZE_LIMIT,
+        }),
+    ));
+    let (_tasks, mut ctx) =
+        launch_test_node!(chain_spec.clone(), high_gas_limit_payload_attributes);
+
+    let initcode = large_contract_initcode();
+    let initcode_len = initcode.len();
+    assert!(initcode_len > MAX_INITCODE_SIZE);
+    let deployment = TransactionTestContext::sign_tx(
+        signer,
+        TransactionRequest {
+            chain_id: Some(chain_spec.chain_id()),
+            nonce: Some(0),
+            to: Some(TxKind::Create),
+            gas: Some(CONTRACT_DEPLOYMENT_GAS_LIMIT),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1),
+            input: TransactionInput::new(initcode),
+            ..Default::default()
+        },
+    )
+    .await;
+    let raw_deployment: Bytes = deployment.encoded_2718().into();
+
+    // At genesis, the txpool still enforces EIP-3860's default initcode limit.
+    let err = ctx.rpc.inject_tx(raw_deployment.clone()).await.unwrap_err();
+    assert!(
+        err.to_string().contains("max initcode size exceeded"),
+        "expected oversized initcode rejection before EvmLimitsFork0, got: {err}"
+    );
+
+    // Block 1 activates EvmLimitsFork0. The same transaction must now pass txpool validation.
+    let activation_payload = advance!(ctx);
+    let activation_timestamp = activation_payload.block().timestamp();
+    assert!(chain_spec.is_evm_limits_fork0_active_at_timestamp(activation_timestamp));
+    assert!(!chain_spec.is_karst_active_at_timestamp(activation_timestamp));
+    let deployment_hash = ctx.rpc.inject_tx(raw_deployment).await?;
+
+    // Block 2 proves REVM also applies the custom contract-size limit during creation.
+    let deployment_payload = advance!(ctx);
+    let included = deployment_payload
+        .block()
+        .body()
+        .transactions()
+        .find(|tx| *tx.tx_hash() == deployment_hash)
+        .expect("oversized contract deployment should be included after EvmLimitsFork0");
+    assert_eq!(included.input().len(), initcode_len);
+
+    let receipt = ctx
+        .rpc
+        .inner
+        .eth_api()
+        .transaction_receipt(deployment_hash)
+        .await?
+        .expect("oversized contract deployment should have a receipt");
+    assert!(receipt.inner.inner.status(), "oversized contract deployment should succeed");
+    let contract_address =
+        receipt.inner.contract_address.expect("deployment should create a contract");
+
+    let state = ctx.inner.provider.latest()?;
+    let code = state.account_code(&contract_address)?.expect("deployed contract should have code");
+    assert_eq!(code.original_bytes().len(), LARGE_CONTRACT_SIZE);
 
     Ok(())
 }
