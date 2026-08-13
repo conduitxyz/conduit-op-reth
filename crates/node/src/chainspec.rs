@@ -12,7 +12,7 @@ use reth_optimism_chainspec::{
 };
 use reth_optimism_forks::{OpHardfork, OpHardforks};
 use reth_primitives_traits::SealedHeader;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
 /// Account state to apply during a state override hardfork.
@@ -38,19 +38,13 @@ pub struct StateOverrideFork0Config {
     pub updates: HashMap<Address, StateOverrideAccount>,
 }
 
-/// Maximum bytecode size configurable by EvmLimitsFork0 (614,400 bytes).
-pub const EVM_LIMITS_FORK0_MAX_CODE_SIZE: u64 = 614_400;
-
-/// Maximum initcode size configurable by EvmLimitsFork0 (1,228,800 bytes).
-pub const EVM_LIMITS_FORK0_MAX_INITCODE_SIZE: u64 = 1_228_800;
-
 /// EVM limits to apply when EvmLimitsFork0 activates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvmLimitsFork0Config {
     /// Optional maximum deployed contract bytecode size.
-    pub max_code_size: Option<u64>,
+    pub max_code_size: Option<usize>,
     /// Optional maximum transaction initcode size.
-    pub max_initcode_size: Option<u64>,
+    pub max_initcode_size: Option<usize>,
     /// Optional maximum gas allowed per transaction.
     pub tx_gas_limit_cap: Option<u64>,
 }
@@ -197,19 +191,9 @@ struct StateOverrideFork0Raw {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EvmLimitsFork0Raw {
     time: u64,
-    #[serde(default, deserialize_with = "deserialize_present_u64")]
-    max_code_size: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_present_u64")]
-    max_initcode_size: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_present_u64")]
+    max_code_size: Option<usize>,
+    max_initcode_size: Option<usize>,
     tx_gas_limit_cap: Option<u64>,
-}
-
-fn deserialize_present_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    u64::deserialize(deserializer).map(Some)
 }
 
 const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
@@ -320,21 +304,13 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
         });
 
         let evm_limits_fork0 = if let Some(raw) = raw_evm_limits_fork0 {
-            let karst_time = match op_chain_spec.op_fork_activation(OpHardfork::Karst) {
-                ForkCondition::Timestamp(time) => time,
+            match op_chain_spec.op_fork_activation(OpHardfork::Karst) {
+                ForkCondition::Timestamp(_) => {}
                 condition => {
                     return Err(eyre::eyre!(
                         "EvmLimitsFork0 requires Karst to be timestamp-scheduled, got {condition:?}"
                     ));
                 }
-            };
-
-            if raw.time <= karst_time {
-                return Err(eyre::eyre!(
-                    "EvmLimitsFork0 timestamp {} must be after Karst timestamp {}",
-                    raw.time,
-                    karst_time
-                ));
             }
 
             let genesis_timestamp = op_chain_spec.genesis_header().timestamp;
@@ -351,24 +327,6 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
                 raw.tx_gas_limit_cap.is_none()
             {
                 return Err(eyre::eyre!("EvmLimitsFork0 must configure at least one EVM limit"));
-            }
-
-            if let Some(max_code_size) = raw.max_code_size &&
-                max_code_size > EVM_LIMITS_FORK0_MAX_CODE_SIZE
-            {
-                return Err(eyre::eyre!(
-                    "EvmLimitsFork0 maxCodeSize {max_code_size} exceeds maximum {}",
-                    EVM_LIMITS_FORK0_MAX_CODE_SIZE
-                ));
-            }
-
-            if let Some(max_initcode_size) = raw.max_initcode_size &&
-                max_initcode_size > EVM_LIMITS_FORK0_MAX_INITCODE_SIZE
-            {
-                return Err(eyre::eyre!(
-                    "EvmLimitsFork0 maxInitcodeSize {max_initcode_size} exceeds maximum {}",
-                    EVM_LIMITS_FORK0_MAX_INITCODE_SIZE
-                ));
             }
 
             if let Some(conflicting_fork) =
@@ -486,8 +444,8 @@ mod tests {
         genesis["config"]["conduit"] = serde_json::json!({
             "evmLimitsFork0": {
                 "time": fork_time,
-                "maxCodeSize": EVM_LIMITS_FORK0_MAX_CODE_SIZE,
-                "maxInitcodeSize": EVM_LIMITS_FORK0_MAX_INITCODE_SIZE,
+                "maxCodeSize": 1_000_000,
+                "maxInitcodeSize": 2_000_000,
                 "txGasLimitCap": u64::MAX
             }
         });
@@ -596,8 +554,8 @@ mod tests {
         assert_eq!(
             spec.evm_limits_fork0,
             Some(EvmLimitsFork0Config {
-                max_code_size: Some(EVM_LIMITS_FORK0_MAX_CODE_SIZE),
-                max_initcode_size: Some(EVM_LIMITS_FORK0_MAX_INITCODE_SIZE),
+                max_code_size: Some(1_000_000),
+                max_initcode_size: Some(2_000_000),
                 tx_gas_limit_cap: Some(u64::MAX),
             })
         );
@@ -621,11 +579,22 @@ mod tests {
     }
 
     #[test]
-    fn evm_limits_fork_must_be_after_karst() {
-        for fork_time in [999, 1000] {
-            let err = try_parse_spec(&with_evm_limits_fork(Some(1000), fork_time)).unwrap_err();
-            assert!(err.to_string().contains("must be after Karst timestamp 1000"));
-        }
+    fn evm_limits_fork_can_activate_before_karst() {
+        let spec = parse_spec(&with_evm_limits_fork(Some(1000), 500));
+
+        assert!(spec.is_evm_limits_fork0_active_at_timestamp(500));
+        assert!(!spec.is_karst_active_at_timestamp(999));
+        assert!(spec.is_evm_limits_fork0_active_at_timestamp(1000));
+        assert!(spec.is_karst_active_at_timestamp(1000));
+
+        let before = spec.fork_id(&head_at(499));
+        let custom_fork = spec.fork_id(&head_at(500));
+        let karst = spec.fork_id(&head_at(1000));
+        assert_eq!(before.next, 500);
+        assert_eq!(custom_fork.next, 1000);
+        assert_eq!(karst.next, 0);
+        assert_ne!(before.hash, custom_fork.hash);
+        assert_ne!(custom_fork.hash, karst.hash);
     }
 
     #[test]
@@ -653,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn evm_limits_fork_accepts_omitted_limits_but_rejects_null() {
+    fn evm_limits_fork_accepts_omitted_and_null_limits() {
         let genesis = with_evm_limits_fork(Some(1000), 2000);
 
         let mut omitted_tx_cap: serde_json::Value = serde_json::from_str(&genesis).unwrap();
@@ -667,42 +636,43 @@ mod tests {
         for field in ["maxCodeSize", "maxInitcodeSize", "txGasLimitCap"] {
             let mut null: serde_json::Value = serde_json::from_str(&genesis).unwrap();
             null["config"]["conduit"]["evmLimitsFork0"][field] = serde_json::Value::Null;
-            let err = try_parse_spec(&serde_json::to_string(&null).unwrap()).unwrap_err();
-            assert!(err.to_string().contains("invalid type: null"));
+            assert!(try_parse_spec(&serde_json::to_string(&null).unwrap()).is_ok());
         }
     }
 
     #[test]
     fn evm_limits_fork_requires_at_least_one_limit() {
-        let mut genesis: serde_json::Value =
-            serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
-        genesis["config"]["conduit"]["evmLimitsFork0"] = serde_json::json!({ "time": 2000 });
-
-        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
-        assert!(err.to_string().contains("must configure at least one EVM limit"));
-    }
-
-    #[test]
-    fn evm_limits_fork_caps_code_size_limits() {
-        for (field, value, expected) in [
-            (
-                "maxCodeSize",
-                EVM_LIMITS_FORK0_MAX_CODE_SIZE + 1,
-                "maxCodeSize 614401 exceeds maximum 614400",
-            ),
-            (
-                "maxInitcodeSize",
-                EVM_LIMITS_FORK0_MAX_INITCODE_SIZE + 1,
-                "maxInitcodeSize 1228801 exceeds maximum 1228800",
-            ),
+        for limits in [
+            serde_json::json!({ "time": 2000 }),
+            serde_json::json!({
+                "time": 2000,
+                "maxCodeSize": null,
+                "maxInitcodeSize": null,
+                "txGasLimitCap": null,
+            }),
         ] {
             let mut genesis: serde_json::Value =
                 serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
-            genesis["config"]["conduit"]["evmLimitsFork0"][field] = serde_json::json!(value);
+            genesis["config"]["conduit"]["evmLimitsFork0"] = limits;
 
             let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
-            assert!(err.to_string().contains(expected));
+            assert!(err.to_string().contains("must configure at least one EVM limit"));
         }
+    }
+
+    #[test]
+    fn evm_limits_fork_accepts_arbitrary_code_size_limits() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
+        genesis["config"]["conduit"]["evmLimitsFork0"]["maxCodeSize"] =
+            serde_json::json!(usize::MAX);
+        genesis["config"]["conduit"]["evmLimitsFork0"]["maxInitcodeSize"] =
+            serde_json::json!(usize::MAX);
+
+        let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+        let limits = spec.evm_limits_fork0.unwrap();
+        assert_eq!(limits.max_code_size, Some(usize::MAX));
+        assert_eq!(limits.max_initcode_size, Some(usize::MAX));
     }
 
     #[test]

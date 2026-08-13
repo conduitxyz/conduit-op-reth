@@ -209,10 +209,10 @@ impl ConduitOpEvmConfig {
             let Some(limits) = self.chain_spec.evm_limits_fork0
         {
             if let Some(max_code_size) = limits.max_code_size {
-                env.cfg_env.limit_contract_code_size = Some(max_code_size as usize);
+                env.cfg_env.limit_contract_code_size = Some(max_code_size);
             }
             if let Some(max_initcode_size) = limits.max_initcode_size {
-                env.cfg_env.limit_contract_initcode_size = Some(max_initcode_size as usize);
+                env.cfg_env.limit_contract_initcode_size = Some(max_initcode_size);
             }
             if let Some(tx_gas_limit_cap) = limits.tx_gas_limit_cap {
                 env.cfg_env.tx_gas_limit_cap = Some(tx_gas_limit_cap);
@@ -364,12 +364,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chainspec::{
-        ConduitOpChainSpecParser, EVM_LIMITS_FORK0_MAX_CODE_SIZE,
-        EVM_LIMITS_FORK0_MAX_INITCODE_SIZE,
-    };
+    use crate::chainspec::ConduitOpChainSpecParser;
     use alloy_primitives::{Address, B256, Bytes};
     use reth_cli::chainspec::ChainSpecParser;
+
+    const TEST_MAX_CODE_SIZE: usize = 1_000_000;
+    const TEST_MAX_INITCODE_SIZE: usize = 2_000_000;
 
     const KARST_GENESIS: &str = r#"{
         "config": {
@@ -404,11 +404,11 @@ mod tests {
         "alloc": {}
     }"#;
 
-    fn with_evm_limits_fork(limits: serde_json::Value) -> String {
+    fn with_evm_limits_fork(time: u64, limits: serde_json::Value) -> String {
         let mut genesis: serde_json::Value = serde_json::from_str(KARST_GENESIS).unwrap();
         let mut fork = limits;
         if let serde_json::Value::Object(ref mut fields) = fork {
-            fields.insert("time".to_string(), serde_json::json!(2000));
+            fields.insert("time".to_string(), serde_json::json!(time));
         }
         genesis["config"]["conduit"] = serde_json::json!({ "evmLimitsFork0": fork });
         serde_json::to_string(&genesis).unwrap()
@@ -460,11 +460,14 @@ mod tests {
     #[test]
     fn evm_limits_fork_applies_at_activation() {
         let spec = parse_genesis(
-            &with_evm_limits_fork(serde_json::json!({
-                "maxCodeSize": EVM_LIMITS_FORK0_MAX_CODE_SIZE,
-                "maxInitcodeSize": EVM_LIMITS_FORK0_MAX_INITCODE_SIZE,
-                "txGasLimitCap": u64::MAX,
-            })),
+            &with_evm_limits_fork(
+                2000,
+                serde_json::json!({
+                    "maxCodeSize": TEST_MAX_CODE_SIZE,
+                    "maxInitcodeSize": TEST_MAX_INITCODE_SIZE,
+                    "txGasLimitCap": u64::MAX,
+                }),
+            ),
             "evm-limits",
         );
         let before = Header { timestamp: 1999, gas_limit: 30_000_000, ..Default::default() };
@@ -479,14 +482,8 @@ mod tests {
 
         let env_active = evm_config.evm_env(&active).unwrap();
         assert_eq!(env_active.cfg_env.spec, OpSpecId::KARST);
-        assert_eq!(
-            env_active.cfg_env.limit_contract_code_size,
-            Some(EVM_LIMITS_FORK0_MAX_CODE_SIZE as usize)
-        );
-        assert_eq!(
-            env_active.cfg_env.limit_contract_initcode_size,
-            Some(EVM_LIMITS_FORK0_MAX_INITCODE_SIZE as usize)
-        );
+        assert_eq!(env_active.cfg_env.limit_contract_code_size, Some(TEST_MAX_CODE_SIZE));
+        assert_eq!(env_active.cfg_env.limit_contract_initcode_size, Some(TEST_MAX_INITCODE_SIZE));
         assert_eq!(env_active.cfg_env.tx_gas_limit_cap, Some(u64::MAX));
 
         let next_env = evm_config
@@ -506,11 +503,41 @@ mod tests {
     }
 
     #[test]
+    fn evm_limits_fork_can_preempt_karst_tx_gas_cap() {
+        let spec = parse_genesis(
+            &with_evm_limits_fork(
+                500,
+                serde_json::json!({
+                    "txGasLimitCap": u64::MAX,
+                }),
+            ),
+            "evm-limits-before-karst",
+        );
+        let evm_config = ConduitOpEvmConfig::new(spec);
+
+        let before = Header { timestamp: 499, gas_limit: 30_000_000, ..Default::default() };
+        let custom_fork = Header { timestamp: 500, gas_limit: 30_000_000, ..Default::default() };
+        let karst = Header { timestamp: 1000, gas_limit: 30_000_000, ..Default::default() };
+
+        let before_env = evm_config.evm_env(&before).unwrap();
+        assert_eq!(before_env.cfg_env.spec, OpSpecId::JOVIAN);
+        assert_eq!(before_env.cfg_env.tx_gas_limit_cap, None);
+
+        let custom_fork_env = evm_config.evm_env(&custom_fork).unwrap();
+        assert_eq!(custom_fork_env.cfg_env.spec, OpSpecId::JOVIAN);
+        assert_eq!(custom_fork_env.cfg_env.tx_gas_limit_cap, Some(u64::MAX));
+
+        let karst_env = evm_config.evm_env(&karst).unwrap();
+        assert_eq!(karst_env.cfg_env.spec, OpSpecId::KARST);
+        assert_eq!(karst_env.cfg_env.tx_gas_limit_cap, Some(u64::MAX));
+    }
+
+    #[test]
     fn evm_limits_fork_leaves_omitted_limits_unchanged() {
         let active = Header { timestamp: 2000, gas_limit: 30_000_000, ..Default::default() };
 
         let gas_only_spec = parse_genesis(
-            &with_evm_limits_fork(serde_json::json!({ "txGasLimitCap": u64::MAX })),
+            &with_evm_limits_fork(2000, serde_json::json!({ "txGasLimitCap": u64::MAX })),
             "evm-limits-gas-only",
         );
         let gas_only_env = ConduitOpEvmConfig::new(gas_only_spec).evm_env(&active).unwrap();
@@ -519,16 +546,16 @@ mod tests {
         assert_eq!(gas_only_env.cfg_env.tx_gas_limit_cap, Some(u64::MAX));
 
         let code_only_spec = parse_genesis(
-            &with_evm_limits_fork(serde_json::json!({
-                "maxCodeSize": EVM_LIMITS_FORK0_MAX_CODE_SIZE,
-            })),
+            &with_evm_limits_fork(
+                2000,
+                serde_json::json!({
+                    "maxCodeSize": TEST_MAX_CODE_SIZE,
+                }),
+            ),
             "evm-limits-code-only",
         );
         let code_only_env = ConduitOpEvmConfig::new(code_only_spec).evm_env(&active).unwrap();
-        assert_eq!(
-            code_only_env.cfg_env.limit_contract_code_size,
-            Some(EVM_LIMITS_FORK0_MAX_CODE_SIZE as usize)
-        );
+        assert_eq!(code_only_env.cfg_env.limit_contract_code_size, Some(TEST_MAX_CODE_SIZE));
         assert_eq!(code_only_env.cfg_env.limit_contract_initcode_size, None);
         assert_eq!(code_only_env.cfg_env.tx_gas_limit_cap, Some(16_777_216));
     }
