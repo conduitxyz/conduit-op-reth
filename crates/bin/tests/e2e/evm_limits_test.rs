@@ -2,14 +2,16 @@ use crate::e2e::{
     BASE_GENESIS, FORK_ACTIVATION_TIMESTAMP, advance, launch_test_node, op_payload_attributes,
     parse_chain_spec,
 };
-use alloy_consensus::{Transaction, TxReceipt};
+use alloy_consensus::{BlockHeader, Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
 use alloy_primitives::{Bytes, TxKind, U256, address};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
+use conduit_op_reth_node::hardforks::ConduitOpHardforks;
 use reth_chainspec::EthChainSpec;
 use reth_e2e_test_utils::transaction::TransactionTestContext;
+use reth_optimism_chainspec::OpHardforks;
 use reth_provider::StateProviderFactory;
 use reth_rpc_eth_api::helpers::EthTransactions;
 use reth_storage_api::AccountReader;
@@ -113,6 +115,9 @@ async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> 
     let pre_karst = TransactionTestContext::sign_tx(signer.clone(), gas_burner_tx(0)).await;
     let pre_karst_hash = ctx.rpc.inject_tx(Bytes::from(pre_karst.encoded_2718())).await?;
     let pre_karst_payload = advance!(ctx);
+    let pre_karst_timestamp = pre_karst_payload.block().timestamp();
+    assert!(!chain_spec.is_karst_active_at_timestamp(pre_karst_timestamp));
+    assert!(!chain_spec.is_evm_limits_fork0_active_at_timestamp(pre_karst_timestamp));
     let pre_karst_tx = pre_karst_payload
         .block()
         .body()
@@ -138,7 +143,10 @@ async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> 
     let post_karst_raw: Bytes = post_karst.encoded_2718().into();
 
     // Block 3 activates Karst. Once it is canonical, the txpool must enforce EIP-7825.
-    advance!(ctx);
+    let karst_payload = advance!(ctx);
+    let karst_timestamp = karst_payload.block().timestamp();
+    assert!(chain_spec.is_karst_active_at_timestamp(karst_timestamp));
+    assert!(!chain_spec.is_evm_limits_fork0_active_at_timestamp(karst_timestamp));
     let err = ctx.rpc.inject_tx(post_karst_raw.clone()).await.unwrap_err();
     assert!(
         err.to_string().contains("gas limit too high"),
@@ -146,7 +154,10 @@ async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> 
     );
 
     // Block 4 activates the custom fork. Once it is canonical, the txpool must accept the same tx.
-    advance!(ctx);
+    let custom_fork_payload = advance!(ctx);
+    let custom_fork_timestamp = custom_fork_payload.block().timestamp();
+    assert!(chain_spec.is_karst_active_at_timestamp(custom_fork_timestamp));
+    assert!(chain_spec.is_evm_limits_fork0_active_at_timestamp(custom_fork_timestamp));
     let post_fork_hash = ctx.rpc.inject_tx(post_karst_raw).await?;
 
     // Block 5 proves the payload builder and REVM accept and execute it again.
