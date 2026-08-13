@@ -1,9 +1,5 @@
-use crate::{
-    chainspec::ConduitOpChainSpec,
-    evm::{ConduitOpExecutorBuilder, conduit_evm_limits},
-};
+use crate::{chainspec::ConduitOpChainSpec, evm::ConduitOpExecutorBuilder};
 use reth_engine_local::LocalPayloadAttributesBuilder;
-use reth_evm::EvmLimitParams;
 use reth_node_api::{FullNodeComponents, PayloadAttributesBuilder, PayloadTypes};
 use reth_node_builder::{
     DebugNode, Node, NodeAdapter, NodeComponentsBuilder, NodeTypes,
@@ -51,11 +47,6 @@ pub struct ConduitOpNode {
     /// Interop failsafe gate shared between the txpool's interop filter client and payload
     /// builder.
     pub interop_failsafe: InteropFailsafe,
-    /// Optional EVM limit overrides (e.g. Conduit's higher code/initcode sizes).
-    ///
-    /// When `Some`, the executor in the node pipeline applies these limits to every EVM
-    /// environment. When `None`, standard OP Stack defaults apply.
-    pub evm_limits: Option<EvmLimitParams>,
 }
 
 impl ConduitOpNode {
@@ -67,7 +58,6 @@ impl ConduitOpNode {
             gas_limit_config: OpGasLimitConfig::default(),
             sdm_post_exec_opt_in: SdmPostExecOptIn::default(),
             interop_failsafe: InteropFailsafe::default(),
-            evm_limits: None,
         }
     }
 
@@ -80,12 +70,6 @@ impl ConduitOpNode {
     /// Configure the gas limit configuration for the OP builder.
     pub fn with_gas_limit_config(mut self, gas_limit_config: OpGasLimitConfig) -> Self {
         self.gas_limit_config = gas_limit_config;
-        self
-    }
-
-    /// Enable Conduit's higher EVM limits (614KB max code size, 1.2MB max initcode size).
-    pub fn with_evm_limits(mut self, enabled: bool) -> Self {
-        self.evm_limits = enabled.then(conduit_evm_limits);
         self
     }
 }
@@ -125,7 +109,7 @@ where
             self.args;
         ComponentsBuilder::default()
             .node_types::<N>()
-            .executor(ConduitOpExecutorBuilder { limits: self.evm_limits })
+            .executor(ConduitOpExecutorBuilder)
             .pool(
                 OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)

@@ -30,7 +30,7 @@ fn high_gas_limit_payload_attributes(
     attributes
 }
 
-fn remove_tx_gas_limit_genesis(
+fn evm_limits_genesis(
     sender: alloy_primitives::Address,
     gas_burner: alloy_primitives::Address,
 ) -> String {
@@ -46,7 +46,10 @@ fn remove_tx_gas_limit_genesis(
     genesis["baseFeePerGas"] = serde_json::json!("0x1");
     genesis["config"]["karstTime"] = serde_json::json!(0);
     genesis["config"]["conduit"] = serde_json::json!({
-        "removeTxGasLimitFork0": { "time": FORK_ACTIVATION_TIMESTAMP }
+        "evmLimitsFork0": {
+            "time": FORK_ACTIVATION_TIMESTAMP,
+            "txGasLimitCap": u64::MAX
+        }
     });
     let artifact: serde_json::Value =
         serde_json::from_str(include_str!("contracts/GasBurner.json"))
@@ -69,13 +72,13 @@ fn remove_tx_gas_limit_genesis(
 /// Proves the full RPC -> txpool -> payload builder -> execution path rejects a 500M-gas
 /// transaction under Karst's EIP-7825 cap, then accepts and executes it after the custom fork.
 #[tokio::test]
-async fn test_500m_gas_transaction_after_remove_tx_gas_limit_fork() -> eyre::Result<()> {
+async fn test_500m_gas_transaction_after_evm_limits_fork() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let signer: PrivateKeySigner =
         "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse()?;
     let gas_burner = address!("5000000000000000000000000000000000000000");
-    let chain_spec = parse_chain_spec(&remove_tx_gas_limit_genesis(signer.address(), gas_burner));
+    let chain_spec = parse_chain_spec(&evm_limits_genesis(signer.address(), gas_burner));
     let (_tasks, mut ctx) =
         launch_test_node!(chain_spec.clone(), high_gas_limit_payload_attributes);
     let input = GasBurner::burnCall {

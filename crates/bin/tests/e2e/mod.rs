@@ -5,9 +5,9 @@ use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
 use reth_optimism_node::{OpPayloadAttributes, payload::OpPayloadAttrs};
 use std::sync::Arc;
 
+pub mod evm_limits_test;
 pub mod genesis_validation_test;
 pub mod proofs_history_test;
-pub mod remove_tx_gas_limit_test;
 pub mod state_override_test;
 
 /// Solidity contract preamble: PUSH1 0x80 PUSH1 0x40 MSTORE.

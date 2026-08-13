@@ -23,8 +23,7 @@ use alloy_op_evm::{
 use op_alloy_consensus::{EIP1559ParamError, SDMGasEntry};
 use op_revm::OpSpecId;
 use reth_evm::{
-    ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, EvmLimitParams, ExecutableTxIterator,
-    ExecutionCtxFor,
+    ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
     execute::{BasicBlockBuilder, BlockBuilder},
 };
 use reth_node_builder::{BuilderContext, NodeTypes, components::ExecutorBuilder};
@@ -45,21 +44,6 @@ use std::sync::Arc;
 
 type InnerBlockExecutorFactory =
     OpBlockExecutorFactory<OpRethReceiptBuilder, Arc<ConduitOpChainSpec>, OpEvmFactory<OpTx>>;
-
-/// Maximum bytecode size for deployed contracts (614,400 bytes).
-pub const CONDUIT_MAX_CODE_SIZE: usize = 614_400;
-
-/// Maximum initcode size for transactions (1,228,800 bytes).
-pub const CONDUIT_MAX_INITCODE_SIZE: usize = 1_228_800;
-
-/// Returns the Conduit EVM limit parameters.
-pub const fn conduit_evm_limits() -> EvmLimitParams {
-    EvmLimitParams {
-        max_code_size: CONDUIT_MAX_CODE_SIZE,
-        max_initcode_size: CONDUIT_MAX_INITCODE_SIZE,
-        tx_gas_limit_cap: None,
-    }
-}
 
 /// Custom block executor wrapping [`OpBlockExecutor`].
 ///
@@ -204,32 +188,13 @@ impl BlockExecutorFactory for ConduitOpEvmConfig {
 pub struct ConduitOpEvmConfig {
     inner: OpEvmConfig<ConduitOpChainSpec, OpPrimitives>,
     chain_spec: Arc<ConduitOpChainSpec>,
-    limits: Option<EvmLimitParams>,
 }
 
 impl ConduitOpEvmConfig {
-    /// Creates a new [`ConduitOpEvmConfig`] with standard OP Stack defaults (no limit overrides).
+    /// Creates a new [`ConduitOpEvmConfig`].
     pub fn new(chain_spec: Arc<ConduitOpChainSpec>) -> Self {
-        Self::with_limits(chain_spec, None)
-    }
-
-    /// Creates a new [`ConduitOpEvmConfig`] with standard OP Stack defaults (no limit overrides).
-    pub fn optimism(chain_spec: Arc<ConduitOpChainSpec>) -> Self {
-        Self::with_limits(chain_spec, None)
-    }
-
-    /// Creates a new [`ConduitOpEvmConfig`] with Conduit's higher EVM limits.
-    pub fn conduit(chain_spec: Arc<ConduitOpChainSpec>) -> Self {
-        Self::with_limits(chain_spec, Some(conduit_evm_limits()))
-    }
-
-    /// Creates a new [`ConduitOpEvmConfig`] with the given optional EVM limit overrides.
-    pub fn with_limits(
-        chain_spec: Arc<ConduitOpChainSpec>,
-        limits: Option<EvmLimitParams>,
-    ) -> Self {
         let inner = OpEvmConfig::new(chain_spec.clone(), OpRethReceiptBuilder::default());
-        Self { inner, chain_spec, limits }
+        Self { inner, chain_spec }
     }
 
     /// Returns the receipt builder used by the block executor factory.
@@ -237,21 +202,21 @@ impl ConduitOpEvmConfig {
         self.inner.executor_factory.receipt_builder()
     }
 
-    /// Applies configured EVM limits and active Conduit hardfork rules to the environment.
+    /// Applies EvmLimitsFork0 parameters when the hardfork is active.
     fn maybe_apply_limits(&self, mut env: EvmEnv<OpSpecId>) -> EvmEnv<OpSpecId> {
-        if let Some(limits) = self.limits {
-            env.cfg_env.limit_contract_code_size = Some(limits.max_code_size);
-            env.cfg_env.limit_contract_initcode_size = Some(limits.max_initcode_size);
+        let timestamp = env.block_env.timestamp().saturating_to();
+        if self.chain_spec.is_evm_limits_fork0_active_at_timestamp(timestamp) &&
+            let Some(limits) = self.chain_spec.evm_limits_fork0
+        {
+            if let Some(max_code_size) = limits.max_code_size {
+                env.cfg_env.limit_contract_code_size = Some(max_code_size as usize);
+            }
+            if let Some(max_initcode_size) = limits.max_initcode_size {
+                env.cfg_env.limit_contract_initcode_size = Some(max_initcode_size as usize);
+            }
             if let Some(tx_gas_limit_cap) = limits.tx_gas_limit_cap {
                 env.cfg_env.tx_gas_limit_cap = Some(tx_gas_limit_cap);
             }
-        }
-
-        let timestamp = env.block_env.timestamp().saturating_to();
-        if self.chain_spec.is_remove_tx_gas_limit_fork0_active_at_timestamp(timestamp) {
-            // `None` falls back to EIP-7825's 2^24 cap under Karst/Osaka, so explicitly set the
-            // maximum value to disable only the per-transaction cap while retaining the spec.
-            env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
         }
 
         env
@@ -379,24 +344,9 @@ impl ConfigureEngineEvm<OpExecData> for ConduitOpEvmConfig {
 /// Executor builder that produces [`ConduitOpEvmConfig`].
 ///
 /// Replaces [`OpExecutorBuilder`](reth_optimism_node::node::OpExecutorBuilder) to wire
-/// custom state transitions into the node, with optional EVM limit overrides.
+/// custom state transitions into the node.
 #[derive(Debug, Copy, Clone, Default)]
-pub struct ConduitOpExecutorBuilder {
-    /// Optional EVM limit overrides applied to every EVM environment.
-    pub limits: Option<EvmLimitParams>,
-}
-
-impl ConduitOpExecutorBuilder {
-    /// Creates a builder with standard OP Stack defaults (no limit overrides).
-    pub const fn optimism() -> Self {
-        Self { limits: None }
-    }
-
-    /// Creates a builder with Conduit's higher EVM limits.
-    pub const fn conduit() -> Self {
-        Self { limits: Some(conduit_evm_limits()) }
-    }
-}
+pub struct ConduitOpExecutorBuilder;
 
 impl<Node> ExecutorBuilder<Node> for ConduitOpExecutorBuilder
 where
@@ -407,14 +357,17 @@ where
     type EVM = ConduitOpEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        Ok(ConduitOpEvmConfig::with_limits(ctx.chain_spec(), self.limits))
+        Ok(ConduitOpEvmConfig::new(ctx.chain_spec()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chainspec::ConduitOpChainSpecParser;
+    use crate::chainspec::{
+        ConduitOpChainSpecParser, EVM_LIMITS_FORK0_MAX_CODE_SIZE,
+        EVM_LIMITS_FORK0_MAX_INITCODE_SIZE,
+    };
     use alloy_primitives::{Address, B256, Bytes};
     use reth_cli::chainspec::ChainSpecParser;
 
@@ -451,11 +404,13 @@ mod tests {
         "alloc": {}
     }"#;
 
-    fn with_remove_tx_gas_limit_fork() -> String {
+    fn with_evm_limits_fork(limits: serde_json::Value) -> String {
         let mut genesis: serde_json::Value = serde_json::from_str(KARST_GENESIS).unwrap();
-        genesis["config"]["conduit"] = serde_json::json!({
-            "removeTxGasLimitFork0": { "time": 2000 }
-        });
+        let mut fork = limits;
+        if let serde_json::Value::Object(ref mut fields) = fork {
+            fields.insert("time".to_string(), serde_json::json!(2000));
+        }
+        genesis["config"]["conduit"] = serde_json::json!({ "evmLimitsFork0": fork });
         serde_json::to_string(&genesis).unwrap()
     }
 
@@ -502,73 +457,79 @@ mod tests {
         assert_eq!(env_post.cfg_env.tx_gas_limit_cap(), 16_777_216);
     }
 
-    /// Conduit EVM limits configured via [`ConduitOpEvmConfig::conduit`] must flow into
-    /// every EVM environment; the default constructors must leave OP Stack defaults intact.
     #[test]
-    fn conduit_limits_flow_through_evm_env() {
-        let dir = std::env::temp_dir().join("conduit-op-reth-limits-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("genesis.json");
-        std::fs::write(&path, KARST_GENESIS).unwrap();
-        let spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap()).unwrap();
-        std::fs::remove_dir_all(&dir).ok();
+    fn evm_limits_fork_applies_at_activation() {
+        let spec = parse_genesis(
+            &with_evm_limits_fork(serde_json::json!({
+                "maxCodeSize": EVM_LIMITS_FORK0_MAX_CODE_SIZE,
+                "maxInitcodeSize": EVM_LIMITS_FORK0_MAX_INITCODE_SIZE,
+                "txGasLimitCap": u64::MAX,
+            })),
+            "evm-limits",
+        );
+        let before = Header { timestamp: 1999, gas_limit: 30_000_000, ..Default::default() };
+        let active = Header { timestamp: 2000, gas_limit: 30_000_000, ..Default::default() };
+        let evm_config = ConduitOpEvmConfig::new(spec);
 
-        let pre = Header { timestamp: 999, gas_limit: 30_000_000, ..Default::default() };
-        let post = Header { timestamp: 1000, gas_limit: 30_000_000, ..Default::default() };
+        let env_before = evm_config.evm_env(&before).unwrap();
+        assert_eq!(env_before.cfg_env.spec, OpSpecId::KARST);
+        assert_eq!(env_before.cfg_env.limit_contract_code_size, None);
+        assert_eq!(env_before.cfg_env.limit_contract_initcode_size, None);
+        assert_eq!(env_before.cfg_env.tx_gas_limit_cap, Some(16_777_216));
 
-        let conduit_config = ConduitOpEvmConfig::conduit(spec.clone());
-        let env_pre = conduit_config.evm_env(&pre).unwrap();
-        assert_eq!(env_pre.cfg_env.limit_contract_code_size, Some(CONDUIT_MAX_CODE_SIZE));
-        assert_eq!(env_pre.cfg_env.limit_contract_initcode_size, Some(CONDUIT_MAX_INITCODE_SIZE));
+        let env_active = evm_config.evm_env(&active).unwrap();
+        assert_eq!(env_active.cfg_env.spec, OpSpecId::KARST);
+        assert_eq!(
+            env_active.cfg_env.limit_contract_code_size,
+            Some(EVM_LIMITS_FORK0_MAX_CODE_SIZE as usize)
+        );
+        assert_eq!(
+            env_active.cfg_env.limit_contract_initcode_size,
+            Some(EVM_LIMITS_FORK0_MAX_INITCODE_SIZE as usize)
+        );
+        assert_eq!(env_active.cfg_env.tx_gas_limit_cap, Some(u64::MAX));
 
-        let env_post = conduit_config.evm_env(&post).unwrap();
-        assert_eq!(env_post.cfg_env.limit_contract_code_size, Some(CONDUIT_MAX_CODE_SIZE));
-        assert_eq!(env_post.cfg_env.limit_contract_initcode_size, Some(CONDUIT_MAX_INITCODE_SIZE));
-        assert_eq!(env_post.cfg_env.tx_gas_limit_cap, Some(16_777_216));
-
-        for default_config in
-            [ConduitOpEvmConfig::new(spec.clone()), ConduitOpEvmConfig::optimism(spec)]
-        {
-            let env = default_config.evm_env(&pre).unwrap();
-            assert_eq!(env.cfg_env.limit_contract_code_size, None);
-            assert_eq!(env.cfg_env.limit_contract_initcode_size, None);
-        }
+        let next_env = evm_config
+            .next_evm_env(
+                &before,
+                &OpNextBlockEnvAttributes {
+                    timestamp: 2000,
+                    suggested_fee_recipient: Address::ZERO,
+                    prev_randao: B256::ZERO,
+                    gas_limit: 30_000_000,
+                    parent_beacon_block_root: None,
+                    extra_data: Bytes::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(next_env.cfg_env, env_active.cfg_env);
     }
 
     #[test]
-    fn remove_tx_gas_limit_fork_overrides_karst_cap() {
-        let spec = parse_genesis(&with_remove_tx_gas_limit_fork(), "remove-tx-gas-limit");
-        let before = Header { timestamp: 1999, gas_limit: 30_000_000, ..Default::default() };
+    fn evm_limits_fork_leaves_omitted_limits_unchanged() {
         let active = Header { timestamp: 2000, gas_limit: 30_000_000, ..Default::default() };
 
-        for evm_config in [
-            ConduitOpEvmConfig::new(spec.clone()),
-            ConduitOpEvmConfig::optimism(spec.clone()),
-            ConduitOpEvmConfig::conduit(spec.clone()),
-        ] {
-            let env_before = evm_config.evm_env(&before).unwrap();
-            assert_eq!(env_before.cfg_env.spec, OpSpecId::KARST);
-            assert_eq!(env_before.cfg_env.tx_gas_limit_cap, Some(16_777_216));
+        let gas_only_spec = parse_genesis(
+            &with_evm_limits_fork(serde_json::json!({ "txGasLimitCap": u64::MAX })),
+            "evm-limits-gas-only",
+        );
+        let gas_only_env = ConduitOpEvmConfig::new(gas_only_spec).evm_env(&active).unwrap();
+        assert_eq!(gas_only_env.cfg_env.limit_contract_code_size, None);
+        assert_eq!(gas_only_env.cfg_env.limit_contract_initcode_size, None);
+        assert_eq!(gas_only_env.cfg_env.tx_gas_limit_cap, Some(u64::MAX));
 
-            let env_active = evm_config.evm_env(&active).unwrap();
-            assert_eq!(env_active.cfg_env.spec, OpSpecId::KARST);
-            assert_eq!(env_active.cfg_env.tx_gas_limit_cap, Some(u64::MAX));
-
-            let next_env = evm_config
-                .next_evm_env(
-                    &before,
-                    &OpNextBlockEnvAttributes {
-                        timestamp: 2000,
-                        suggested_fee_recipient: Address::ZERO,
-                        prev_randao: B256::ZERO,
-                        gas_limit: 30_000_000,
-                        parent_beacon_block_root: None,
-                        extra_data: Bytes::new(),
-                    },
-                )
-                .unwrap();
-            assert_eq!(next_env.cfg_env.spec, OpSpecId::KARST);
-            assert_eq!(next_env.cfg_env.tx_gas_limit_cap, Some(u64::MAX));
-        }
+        let code_only_spec = parse_genesis(
+            &with_evm_limits_fork(serde_json::json!({
+                "maxCodeSize": EVM_LIMITS_FORK0_MAX_CODE_SIZE,
+            })),
+            "evm-limits-code-only",
+        );
+        let code_only_env = ConduitOpEvmConfig::new(code_only_spec).evm_env(&active).unwrap();
+        assert_eq!(
+            code_only_env.cfg_env.limit_contract_code_size,
+            Some(EVM_LIMITS_FORK0_MAX_CODE_SIZE as usize)
+        );
+        assert_eq!(code_only_env.cfg_env.limit_contract_initcode_size, None);
+        assert_eq!(code_only_env.cfg_env.tx_gas_limit_cap, Some(16_777_216));
     }
 }
