@@ -19,6 +19,10 @@ const BLOCK_GAS_LIMIT: u64 = 1_000_000_000;
 const GAS_BURNER_MEMORY_BYTES: u64 = 16_000_000;
 const GAS_BURNER_RESERVE: u64 = 10_000;
 const MIN_EXPECTED_GAS_USED: u64 = TX_GAS_LIMIT - GAS_BURNER_RESERVE;
+// Leave one block to initialize the txpool's tracked block gas limit, then one block to execute
+// the pre-Karst transaction.
+const KARST_ACTIVATION_TIMESTAMP: u64 = FORK_ACTIVATION_TIMESTAMP + 1;
+const EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP: u64 = KARST_ACTIVATION_TIMESTAMP + 1;
 
 alloy_sol_macro::sol!("tests/e2e/contracts/GasBurner.sol");
 
@@ -44,10 +48,10 @@ fn evm_limits_genesis(
 
     genesis["gasLimit"] = serde_json::json!(format!("0x{BLOCK_GAS_LIMIT:x}"));
     genesis["baseFeePerGas"] = serde_json::json!("0x1");
-    genesis["config"]["karstTime"] = serde_json::json!(0);
+    genesis["config"]["karstTime"] = serde_json::json!(KARST_ACTIVATION_TIMESTAMP);
     genesis["config"]["conduit"] = serde_json::json!({
         "evmLimitsFork0": {
-            "time": FORK_ACTIVATION_TIMESTAMP,
+            "time": EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP,
             "txGasLimitCap": u64::MAX
         }
     });
@@ -69,10 +73,11 @@ fn evm_limits_genesis(
     serde_json::to_string(&genesis).unwrap()
 }
 
-/// Proves the full RPC -> txpool -> payload builder -> execution path rejects a 500M-gas
-/// transaction under Karst's EIP-7825 cap, then accepts and executes it after the custom fork.
+/// Proves the full RPC -> txpool -> payload builder -> execution path accepts and executes a
+/// 500M-gas transaction before Karst, rejects one under Karst's EIP-7825 cap, then accepts and
+/// executes it again after the custom fork.
 #[tokio::test]
-async fn test_500m_gas_transaction_after_evm_limits_fork() -> eyre::Result<()> {
+async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let signer: PrivateKeySigner =
@@ -87,61 +92,92 @@ async fn test_500m_gas_transaction_after_evm_limits_fork() -> eyre::Result<()> {
     }
     .abi_encode();
 
-    let tx = TransactionRequest {
+    let gas_burner_tx = |nonce| TransactionRequest {
         chain_id: Some(chain_spec.chain_id()),
-        nonce: Some(0),
+        nonce: Some(nonce),
         to: Some(TxKind::Call(gas_burner)),
         value: Some(U256::from(1)),
         gas: Some(TX_GAS_LIMIT),
         max_fee_per_gas: Some(1_000_000_000),
         max_priority_fee_per_gas: Some(1),
-        input: TransactionInput::new(input.into()),
+        input: TransactionInput::new(input.clone().into()),
         ..Default::default()
     };
-    let signed = TransactionTestContext::sign_tx(signer, tx).await;
-    let raw_tx: Bytes = signed.encoded_2718().into();
 
-    // Block 1 is after Karst but before the custom fork. The txpool must enforce EIP-7825.
+    // The txpool starts with a conservative block gas limit and tracks the actual limit after its
+    // first canonical block.
     advance!(ctx);
-    let err = ctx.rpc.inject_tx(raw_tx.clone()).await.unwrap_err();
-    assert!(
-        err.to_string().contains("gas limit too high"),
-        "expected EIP-7825 rejection before custom fork, got: {err}"
-    );
 
-    // Block 2 activates the custom fork. Once it is canonical, the txpool must accept the same tx.
-    advance!(ctx);
-    let tx_hash = ctx.rpc.inject_tx(raw_tx).await?;
-
-    // Block 3 proves the payload builder and block executor both accept the declared 500M limit.
-    let payload = advance!(ctx);
-    let included = payload
+    // Block 2 is before Karst. The txpool, payload builder, and REVM must all accept and execute a
+    // transaction with a 500M declared gas limit.
+    let pre_karst = TransactionTestContext::sign_tx(signer.clone(), gas_burner_tx(0)).await;
+    let pre_karst_hash = ctx.rpc.inject_tx(Bytes::from(pre_karst.encoded_2718())).await?;
+    let pre_karst_payload = advance!(ctx);
+    let pre_karst_tx = pre_karst_payload
         .block()
         .body()
         .transactions()
-        .find(|tx| *tx.tx_hash() == tx_hash)
-        .expect("500M-gas transaction should be included after custom fork");
-    assert_eq!(included.gas_limit(), TX_GAS_LIMIT);
-
-    let receipt = ctx
+        .find(|tx| *tx.tx_hash() == pre_karst_hash)
+        .expect("500M-gas transaction should be included before Karst");
+    assert_eq!(pre_karst_tx.gas_limit(), TX_GAS_LIMIT);
+    let pre_karst_receipt = ctx
         .rpc
         .inner
         .eth_api()
-        .transaction_receipt(tx_hash)
+        .transaction_receipt(pre_karst_hash)
         .await?
-        .expect("500M-gas transaction should have a receipt");
-    assert!(receipt.inner.inner.status(), "gas burner execution should succeed");
+        .expect("pre-Karst 500M-gas transaction should have a receipt");
+    assert!(pre_karst_receipt.inner.inner.status(), "pre-Karst gas burner should succeed");
     assert!(
-        receipt.inner.gas_used >= MIN_EXPECTED_GAS_USED,
-        "gas burner should execute inside REVM and consume nearly 500M gas, used {}",
-        receipt.inner.gas_used
+        pre_karst_receipt.inner.gas_used >= MIN_EXPECTED_GAS_USED,
+        "pre-Karst gas burner should consume nearly 500M gas, used {}",
+        pre_karst_receipt.inner.gas_used
+    );
+
+    let post_karst = TransactionTestContext::sign_tx(signer, gas_burner_tx(1)).await;
+    let post_karst_raw: Bytes = post_karst.encoded_2718().into();
+
+    // Block 3 activates Karst. Once it is canonical, the txpool must enforce EIP-7825.
+    advance!(ctx);
+    let err = ctx.rpc.inject_tx(post_karst_raw.clone()).await.unwrap_err();
+    assert!(
+        err.to_string().contains("gas limit too high"),
+        "expected EIP-7825 rejection under Karst, got: {err}"
+    );
+
+    // Block 4 activates the custom fork. Once it is canonical, the txpool must accept the same tx.
+    advance!(ctx);
+    let post_fork_hash = ctx.rpc.inject_tx(post_karst_raw).await?;
+
+    // Block 5 proves the payload builder and REVM accept and execute it again.
+    let post_fork_payload = advance!(ctx);
+    let post_fork_tx = post_fork_payload
+        .block()
+        .body()
+        .transactions()
+        .find(|tx| *tx.tx_hash() == post_fork_hash)
+        .expect("500M-gas transaction should be included after custom fork");
+    assert_eq!(post_fork_tx.gas_limit(), TX_GAS_LIMIT);
+
+    let post_fork_receipt = ctx
+        .rpc
+        .inner
+        .eth_api()
+        .transaction_receipt(post_fork_hash)
+        .await?
+        .expect("post-fork 500M-gas transaction should have a receipt");
+    assert!(post_fork_receipt.inner.inner.status(), "post-fork gas burner should succeed");
+    assert!(
+        post_fork_receipt.inner.gas_used >= MIN_EXPECTED_GAS_USED,
+        "post-fork gas burner should consume nearly 500M gas, used {}",
+        post_fork_receipt.inner.gas_used
     );
 
     let state = ctx.inner.provider.latest()?;
     assert_eq!(
         state.basic_account(&gas_burner)?.expect("gas burner should exist").balance,
-        U256::from(1),
-        "value transfer proves the gas-burning call completed successfully"
+        U256::from(2),
+        "both value transfers prove the pre-Karst and post-fork calls completed successfully"
     );
 
     Ok(())
