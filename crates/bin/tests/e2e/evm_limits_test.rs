@@ -25,6 +25,7 @@ const MIN_EXPECTED_GAS_USED: u64 = TX_GAS_LIMIT - GAS_BURNER_RESERVE;
 // the pre-Karst transaction.
 const KARST_ACTIVATION_TIMESTAMP: u64 = FORK_ACTIVATION_TIMESTAMP + 1;
 const EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP: u64 = KARST_ACTIVATION_TIMESTAMP + 1;
+const PRE_KARST_EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP: u64 = FORK_ACTIVATION_TIMESTAMP - 1;
 
 alloy_sol_macro::sol!("tests/e2e/contracts/GasBurner.sol");
 
@@ -39,6 +40,7 @@ fn high_gas_limit_payload_attributes(
 fn evm_limits_genesis(
     sender: alloy_primitives::Address,
     gas_burner: alloy_primitives::Address,
+    evm_limits_fork0_time: u64,
 ) -> String {
     let mut genesis: serde_json::Value =
         serde_json::from_str(BASE_GENESIS).expect("failed to parse base genesis");
@@ -53,7 +55,7 @@ fn evm_limits_genesis(
     genesis["config"]["karstTime"] = serde_json::json!(KARST_ACTIVATION_TIMESTAMP);
     genesis["config"]["conduit"] = serde_json::json!({
         "evmLimitsFork0": {
-            "time": EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP,
+            "time": evm_limits_fork0_time,
             "txGasLimitCap": u64::MAX
         }
     });
@@ -85,7 +87,11 @@ async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> 
     let signer: PrivateKeySigner =
         "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse()?;
     let gas_burner = address!("5000000000000000000000000000000000000000");
-    let chain_spec = parse_chain_spec(&evm_limits_genesis(signer.address(), gas_burner));
+    let chain_spec = parse_chain_spec(&evm_limits_genesis(
+        signer.address(),
+        gas_burner,
+        EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP,
+    ));
     let (_tasks, mut ctx) =
         launch_test_node!(chain_spec.clone(), high_gas_limit_payload_attributes);
     let input = GasBurner::burnCall {
@@ -189,6 +195,93 @@ async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> 
         state.basic_account(&gas_burner)?.expect("gas burner should exist").balance,
         U256::from(2),
         "both value transfers prove the pre-Karst and post-fork calls completed successfully"
+    );
+
+    Ok(())
+}
+
+/// Proves that activating EvmLimitsFork0 before Karst prevents Karst's EIP-7825 transaction gas
+/// cap from taking effect in the txpool, payload builder, and REVM.
+#[tokio::test]
+async fn test_500m_gas_limit_override_persists_through_karst() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let signer: PrivateKeySigner =
+        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse()?;
+    let gas_burner = address!("5000000000000000000000000000000000000000");
+    let chain_spec = parse_chain_spec(&evm_limits_genesis(
+        signer.address(),
+        gas_burner,
+        PRE_KARST_EVM_LIMITS_FORK0_ACTIVATION_TIMESTAMP,
+    ));
+    let (_tasks, mut ctx) =
+        launch_test_node!(chain_spec.clone(), high_gas_limit_payload_attributes);
+
+    // Block 1 activates the custom fork and initializes the txpool's tracked block gas limit.
+    let custom_fork_payload = advance!(ctx);
+    let custom_fork_timestamp = custom_fork_payload.block().timestamp();
+    assert!(chain_spec.is_evm_limits_fork0_active_at_timestamp(custom_fork_timestamp));
+    assert!(!chain_spec.is_karst_active_at_timestamp(custom_fork_timestamp));
+
+    // Advance through the remaining pre-Karst block, then activate Karst. The custom fork must
+    // remain active after the standard hardfork changes the underlying EVM spec.
+    advance!(ctx);
+    let karst_payload = advance!(ctx);
+    let karst_timestamp = karst_payload.block().timestamp();
+    assert!(chain_spec.is_evm_limits_fork0_active_at_timestamp(karst_timestamp));
+    assert!(chain_spec.is_karst_active_at_timestamp(karst_timestamp));
+
+    let input = GasBurner::burnCall {
+        memoryBytes: U256::from(GAS_BURNER_MEMORY_BYTES),
+        gasReserve: U256::from(GAS_BURNER_RESERVE),
+    }
+    .abi_encode();
+    let tx = TransactionTestContext::sign_tx(
+        signer,
+        TransactionRequest {
+            chain_id: Some(chain_spec.chain_id()),
+            nonce: Some(0),
+            to: Some(TxKind::Call(gas_burner)),
+            value: Some(U256::from(1)),
+            gas: Some(TX_GAS_LIMIT),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1),
+            input: TransactionInput::new(input.into()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // Injecting after Karst is canonical proves the txpool still sees the custom u64::MAX cap.
+    let tx_hash = ctx.rpc.inject_tx(Bytes::from(tx.encoded_2718())).await?;
+    let post_karst_payload = advance!(ctx);
+    let included = post_karst_payload
+        .block()
+        .body()
+        .transactions()
+        .find(|tx| *tx.tx_hash() == tx_hash)
+        .expect("500M-gas transaction should be included after Karst");
+    assert_eq!(included.gas_limit(), TX_GAS_LIMIT);
+
+    let receipt = ctx
+        .rpc
+        .inner
+        .eth_api()
+        .transaction_receipt(tx_hash)
+        .await?
+        .expect("post-Karst 500M-gas transaction should have a receipt");
+    assert!(receipt.inner.inner.status(), "post-Karst gas burner should succeed");
+    assert!(
+        receipt.inner.gas_used >= MIN_EXPECTED_GAS_USED,
+        "post-Karst gas burner should consume nearly 500M gas, used {}",
+        receipt.inner.gas_used
+    );
+
+    let state = ctx.inner.provider.latest()?;
+    assert_eq!(
+        state.basic_account(&gas_burner)?.expect("gas burner should exist").balance,
+        U256::from(1),
+        "value transfer proves the post-Karst call completed successfully"
     );
 
     Ok(())
