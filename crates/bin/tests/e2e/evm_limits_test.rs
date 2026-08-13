@@ -77,6 +77,30 @@ fn evm_limits_genesis(
     serde_json::to_string(&genesis).unwrap()
 }
 
+fn gas_burner_transaction(
+    chain_id: u64,
+    gas_burner: alloy_primitives::Address,
+    nonce: u64,
+) -> TransactionRequest {
+    let input = GasBurner::burnCall {
+        memoryBytes: U256::from(GAS_BURNER_MEMORY_BYTES),
+        gasReserve: U256::from(GAS_BURNER_RESERVE),
+    }
+    .abi_encode();
+
+    TransactionRequest {
+        chain_id: Some(chain_id),
+        nonce: Some(nonce),
+        to: Some(TxKind::Call(gas_burner)),
+        value: Some(U256::from(1)),
+        gas: Some(TX_GAS_LIMIT),
+        max_fee_per_gas: Some(1_000_000_000),
+        max_priority_fee_per_gas: Some(1),
+        input: TransactionInput::new(input.into()),
+        ..Default::default()
+    }
+}
+
 /// Proves the full RPC -> txpool -> payload builder -> execution path accepts and executes a
 /// 500M-gas transaction before Karst, rejects one under Karst's EIP-7825 cap, then accepts and
 /// executes it again after the custom fork.
@@ -94,23 +118,7 @@ async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> 
     ));
     let (_tasks, mut ctx) =
         launch_test_node!(chain_spec.clone(), high_gas_limit_payload_attributes);
-    let input = GasBurner::burnCall {
-        memoryBytes: U256::from(GAS_BURNER_MEMORY_BYTES),
-        gasReserve: U256::from(GAS_BURNER_RESERVE),
-    }
-    .abi_encode();
-
-    let gas_burner_tx = |nonce| TransactionRequest {
-        chain_id: Some(chain_spec.chain_id()),
-        nonce: Some(nonce),
-        to: Some(TxKind::Call(gas_burner)),
-        value: Some(U256::from(1)),
-        gas: Some(TX_GAS_LIMIT),
-        max_fee_per_gas: Some(1_000_000_000),
-        max_priority_fee_per_gas: Some(1),
-        input: TransactionInput::new(input.clone().into()),
-        ..Default::default()
-    };
+    let gas_burner_tx = |nonce| gas_burner_transaction(chain_spec.chain_id(), gas_burner, nonce);
 
     // The txpool starts with a conservative block gas limit and tracks the actual limit after its
     // first canonical block.
@@ -203,7 +211,7 @@ async fn test_500m_gas_transaction_across_evm_limits_fork() -> eyre::Result<()> 
 /// Proves that activating EvmLimitsFork0 before Karst prevents Karst's EIP-7825 transaction gas
 /// cap from taking effect in the txpool, payload builder, and REVM.
 #[tokio::test]
-async fn test_500m_gas_limit_override_persists_through_karst() -> eyre::Result<()> {
+async fn test_500m_tx_gas_cap_override_persists_through_karst() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let signer: PrivateKeySigner =
@@ -223,32 +231,48 @@ async fn test_500m_gas_limit_override_persists_through_karst() -> eyre::Result<(
     assert!(chain_spec.is_evm_limits_fork0_active_at_timestamp(custom_fork_timestamp));
     assert!(!chain_spec.is_karst_active_at_timestamp(custom_fork_timestamp));
 
-    // Advance through the remaining pre-Karst block, then activate Karst. The custom fork must
-    // remain active after the standard hardfork changes the underlying EVM spec.
-    advance!(ctx);
+    // Block 2 proves the custom fork allows the 500M-gas transaction before Karst.
+    let pre_karst = TransactionTestContext::sign_tx(
+        signer.clone(),
+        gas_burner_transaction(chain_spec.chain_id(), gas_burner, 0),
+    )
+    .await;
+    let pre_karst_hash = ctx.rpc.inject_tx(Bytes::from(pre_karst.encoded_2718())).await?;
+    let pre_karst_payload = advance!(ctx);
+    let pre_karst_timestamp = pre_karst_payload.block().timestamp();
+    assert!(chain_spec.is_evm_limits_fork0_active_at_timestamp(pre_karst_timestamp));
+    assert!(!chain_spec.is_karst_active_at_timestamp(pre_karst_timestamp));
+    let pre_karst_tx = pre_karst_payload
+        .block()
+        .body()
+        .transactions()
+        .find(|tx| *tx.tx_hash() == pre_karst_hash)
+        .expect("500M-gas transaction should be included after EvmLimitsFork0");
+    assert_eq!(pre_karst_tx.gas_limit(), TX_GAS_LIMIT);
+    let pre_karst_receipt = ctx
+        .rpc
+        .inner
+        .eth_api()
+        .transaction_receipt(pre_karst_hash)
+        .await?
+        .expect("pre-Karst 500M-gas transaction should have a receipt");
+    assert!(pre_karst_receipt.inner.inner.status(), "pre-Karst gas burner should succeed");
+    assert!(
+        pre_karst_receipt.inner.gas_used >= MIN_EXPECTED_GAS_USED,
+        "pre-Karst gas burner should consume nearly 500M gas, used {}",
+        pre_karst_receipt.inner.gas_used
+    );
+
+    // Block 3 activates Karst. The custom fork must remain active after the standard hardfork
+    // changes the underlying EVM spec.
     let karst_payload = advance!(ctx);
     let karst_timestamp = karst_payload.block().timestamp();
     assert!(chain_spec.is_evm_limits_fork0_active_at_timestamp(karst_timestamp));
     assert!(chain_spec.is_karst_active_at_timestamp(karst_timestamp));
 
-    let input = GasBurner::burnCall {
-        memoryBytes: U256::from(GAS_BURNER_MEMORY_BYTES),
-        gasReserve: U256::from(GAS_BURNER_RESERVE),
-    }
-    .abi_encode();
     let tx = TransactionTestContext::sign_tx(
         signer,
-        TransactionRequest {
-            chain_id: Some(chain_spec.chain_id()),
-            nonce: Some(0),
-            to: Some(TxKind::Call(gas_burner)),
-            value: Some(U256::from(1)),
-            gas: Some(TX_GAS_LIMIT),
-            max_fee_per_gas: Some(1_000_000_000),
-            max_priority_fee_per_gas: Some(1),
-            input: TransactionInput::new(input.into()),
-            ..Default::default()
-        },
+        gas_burner_transaction(chain_spec.chain_id(), gas_burner, 1),
     )
     .await;
 
@@ -280,8 +304,8 @@ async fn test_500m_gas_limit_override_persists_through_karst() -> eyre::Result<(
     let state = ctx.inner.provider.latest()?;
     assert_eq!(
         state.basic_account(&gas_burner)?.expect("gas burner should exist").balance,
-        U256::from(1),
-        "value transfer proves the post-Karst call completed successfully"
+        U256::from(2),
+        "both value transfers prove the pre-Karst and post-Karst calls completed successfully"
     );
 
     Ok(())
