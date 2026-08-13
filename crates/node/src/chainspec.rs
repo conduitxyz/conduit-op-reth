@@ -234,7 +234,7 @@ fn use_legacy_genesis_header_for_known_chains(op_chain_spec: &mut OpChainSpec) -
 pub struct ConduitOpChainSpecParser;
 
 impl From<OpChainSpec> for ConduitOpChainSpec {
-    /// Wraps a plain [`OpChainSpec`] without any `StateOverrideFork0` configuration.
+    /// Wraps a plain [`OpChainSpec`] without any Conduit custom-fork configuration.
     fn from(inner: OpChainSpec) -> Self {
         Self {
             inner,
