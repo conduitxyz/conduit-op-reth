@@ -62,7 +62,8 @@ unknown-registry = "warn"
 unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-  "https://github.com/paradigmxyz/reth",
+  # OP Labs' shallow reth fork, pinned by the op-reth workspace to carry unreleased reth patches.
+  "https://github.com/op-rs/reth",
   "https://github.com/ethereum-optimism/optimism",
 ]
 
