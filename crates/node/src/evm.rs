@@ -18,7 +18,7 @@ use alloy_evm::{
 use alloy_op_evm::{
     OpBlockExecutionCtx, OpBlockExecutor, OpEvmFactory, PreRefundGasUsed,
     block::{OpTxEnv, receipt_builder::OpReceiptBuilder},
-    post_exec::{PostExecEvm, PostExecExecutorExt, WarmingRefundEvent, WarmingState},
+    post_exec::{PostExecEvm, PostExecExecutorExt, PostExecRefundEvent},
 };
 use op_alloy_consensus::{EIP1559ParamError, SDMGasEntry};
 use op_revm::OpSpecId;
@@ -127,6 +127,8 @@ where
     R: OpReceiptBuilder,
     Spec: OpHardforks + Clone,
 {
+    type Snapshot = E::Snapshot;
+
     fn post_exec_entries(&self) -> &[SDMGasEntry] {
         self.inner.post_exec_entries()
     }
@@ -135,16 +137,16 @@ where
         self.inner.take_post_exec_entries()
     }
 
-    fn take_warming_events_by_tx(&mut self) -> Vec<Vec<WarmingRefundEvent>> {
-        self.inner.take_warming_events_by_tx()
+    fn take_refund_events_by_tx(&mut self) -> Vec<Vec<PostExecRefundEvent>> {
+        self.inner.take_refund_events_by_tx()
     }
 
-    fn warming_state(&self) -> WarmingState {
-        self.inner.warming_state()
+    fn refund_snapshot(&self) -> Self::Snapshot {
+        self.inner.refund_snapshot()
     }
 
-    fn seed_warming_state(&mut self, state: WarmingState) {
-        self.inner.seed_warming_state(state);
+    fn seed_refund_snapshot(&mut self, state: Self::Snapshot) {
+        self.inner.seed_refund_snapshot(state);
     }
 }
 
@@ -267,6 +269,9 @@ impl ConfigureEvm for ConduitOpEvmConfig {
 }
 
 impl ConfigurePostExecEvm for ConduitOpEvmConfig {
+    /// `OpEvmFactory<OpTx>` runs the default `NullRefundPolicy`, whose refund snapshot is empty.
+    type Snapshot = ();
+
     fn post_exec_executor_for_block<'a, DB: Database>(
         &'a self,
         db: &'a mut State<DB>,
@@ -276,7 +281,7 @@ impl ConfigurePostExecEvm for ConduitOpEvmConfig {
         impl BlockExecutor<
             Transaction = <Self::Primitives as NodePrimitives>::SignedTx,
             Receipt = <Self::Primitives as NodePrimitives>::Receipt,
-        > + PostExecExecutorExt
+        > + PostExecExecutorExt<Snapshot = Self::Snapshot>
         + 'a,
         Self::Error,
     > {
@@ -294,7 +299,7 @@ impl ConfigurePostExecEvm for ConduitOpEvmConfig {
     ) -> Result<
         impl BlockBuilder<
             Primitives = Self::Primitives,
-            Executor: PostExecExecutorExt
+            Executor: PostExecExecutorExt<Snapshot = Self::Snapshot>
                           + BlockExecutor<
                 Evm: alloy_evm::Evm<DB: core::ops::DerefMut<Target = State<DB>>>,
                 Result: PreRefundGasUsed,
@@ -367,6 +372,10 @@ mod tests {
     use crate::chainspec::ConduitOpChainSpecParser;
     use alloy_primitives::{Address, B256, Bytes};
     use reth_cli::chainspec::ChainSpecParser;
+    // `Cfg::tx_gas_limit_cap()` resolves the effective EIP-7825 cap. Since op-reth v2.4.2 the
+    // spec-derived cap is no longer written into `cfg_env.tx_gas_limit_cap`, so only the raw
+    // field reflects an explicit override and the accessor reflects what the EVM enforces.
+    use revm::context_interface::Cfg;
 
     const TEST_MAX_CODE_SIZE: usize = 1_000_000;
     const TEST_MAX_INITCODE_SIZE: usize = 2_000_000;
@@ -452,7 +461,6 @@ mod tests {
         assert_eq!(env_post.cfg_env.spec, OpSpecId::KARST);
 
         // The EIP-7825 tx gas cap (2^24) activates exactly at Karst.
-        use revm::context_interface::Cfg;
         assert_eq!(env_pre.cfg_env.tx_gas_limit_cap(), u64::MAX);
         assert_eq!(env_post.cfg_env.tx_gas_limit_cap(), 16_777_216);
     }
@@ -478,7 +486,9 @@ mod tests {
         assert_eq!(env_before.cfg_env.spec, OpSpecId::KARST);
         assert_eq!(env_before.cfg_env.limit_contract_code_size, None);
         assert_eq!(env_before.cfg_env.limit_contract_initcode_size, None);
-        assert_eq!(env_before.cfg_env.tx_gas_limit_cap, Some(16_777_216));
+        // No override before activation, so the EIP-7825 cap still comes from the Karst spec.
+        assert_eq!(env_before.cfg_env.tx_gas_limit_cap, None);
+        assert_eq!(env_before.cfg_env.tx_gas_limit_cap(), 16_777_216);
 
         let env_active = evm_config.evm_env(&active).unwrap();
         assert_eq!(env_active.cfg_env.spec, OpSpecId::KARST);
@@ -557,6 +567,8 @@ mod tests {
         let code_only_env = ConduitOpEvmConfig::new(code_only_spec).evm_env(&active).unwrap();
         assert_eq!(code_only_env.cfg_env.limit_contract_code_size, Some(TEST_MAX_CODE_SIZE));
         assert_eq!(code_only_env.cfg_env.limit_contract_initcode_size, None);
-        assert_eq!(code_only_env.cfg_env.tx_gas_limit_cap, Some(16_777_216));
+        // The fork omits `txGasLimitCap`, so the Karst spec cap is left to apply on its own.
+        assert_eq!(code_only_env.cfg_env.tx_gas_limit_cap, None);
+        assert_eq!(code_only_env.cfg_env.tx_gas_limit_cap(), 16_777_216);
     }
 }

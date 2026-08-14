@@ -42,6 +42,7 @@ pub fn op_payload_attributes(timestamp: u64) -> OpPayloadAttrs {
         withdrawals: Some(vec![]),
         parent_beacon_block_root: Some(B256::ZERO),
         slot_number: None,
+        target_gas_limit: None,
     };
 
     // L1 block info "set L1 block" deposit tx from OP mainnet block 124665056.

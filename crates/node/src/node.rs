@@ -17,7 +17,7 @@ use reth_optimism_node::{
 };
 use reth_optimism_payload_builder::{
     OpPayloadAttrs,
-    config::{OpGasLimitConfig, SdmPostExecOptIn},
+    config::{OpBuilderConfig, OpGasLimitConfig, OperatorSdmOptIn},
 };
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_rpc::eth::OpEthApiBuilder;
@@ -42,8 +42,9 @@ pub struct ConduitOpNode {
     /// Used to control the gas limit of the blocks produced by the OP builder (configured by the
     /// batcher via the `miner_` api).
     pub gas_limit_config: OpGasLimitConfig,
-    /// Local operator opt-in for SDM `PostExec` production.
-    pub sdm_post_exec_opt_in: SdmPostExecOptIn,
+    /// Local operator opt-in for SDM `PostExec` production. Shared (via Arc clones) between the
+    /// payload builder and the `admin_setOperatorSdmOptIn` RPC handler.
+    pub operator_sdm_opt_in: OperatorSdmOptIn,
     /// Interop failsafe gate shared between the txpool's interop filter client and payload
     /// builder.
     pub interop_failsafe: InteropFailsafe,
@@ -52,11 +53,13 @@ pub struct ConduitOpNode {
 impl ConduitOpNode {
     /// Creates a new instance of the ConduitOp node type.
     pub fn new(args: RollupArgs) -> Self {
+        let operator_sdm_opt_in = OperatorSdmOptIn::default();
+        operator_sdm_opt_in.set(args.operator_sdm_opt_in);
         Self {
             args,
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
-            sdm_post_exec_opt_in: SdmPostExecOptIn::default(),
+            operator_sdm_opt_in,
             interop_failsafe: InteropFailsafe::default(),
         }
     }
@@ -71,6 +74,21 @@ impl ConduitOpNode {
     pub fn with_gas_limit_config(mut self, gas_limit_config: OpGasLimitConfig) -> Self {
         self.gas_limit_config = gas_limit_config;
         self
+    }
+
+    /// The [`OpBuilderConfig`] this node's payload builder is configured with.
+    ///
+    /// Assembled as a struct literal rather than through the individual `with_*` setters: because
+    /// [`OpBuilderConfig`] is not `#[non_exhaustive]`, an upstream field addition breaks the build
+    /// here instead of silently defaulting on our node.
+    fn builder_config(&self) -> OpBuilderConfig {
+        OpBuilderConfig {
+            da_config: self.da_config.clone(),
+            gas_limit_config: self.gas_limit_config.clone(),
+            operator_sdm_opt_in: self.operator_sdm_opt_in.clone(),
+            interop_failsafe: self.interop_failsafe.clone(),
+            max_uncompressed_block_size: self.args.max_uncompressed_block_size,
+        }
     }
 }
 
@@ -122,11 +140,7 @@ where
             )
             .payload(BasicPayloadServiceBuilder::new(
                 OpPayloadBuilder::new(compute_pending_block)
-                    .with_da_config(self.da_config.clone())
-                    .with_gas_limit_config(self.gas_limit_config.clone())
-                    .with_sdm_post_exec_opt_in(self.sdm_post_exec_opt_in.clone())
-                    .with_interop_failsafe(self.interop_failsafe.clone())
-                    .with_max_uncompressed_block_size(self.args.max_uncompressed_block_size),
+                    .with_builder_config(self.builder_config()),
             ))
             .network(OpNetworkBuilder::new(disable_txpool_gossip, !discovery_v4))
             .consensus(OpConsensusBuilder::default())
@@ -138,12 +152,13 @@ where
             .with_sequencer_headers(self.args.sequencer_headers.clone())
             .with_da_config(self.da_config.clone())
             .with_gas_limit_config(self.gas_limit_config.clone())
-            .with_sdm_post_exec_opt_in(self.sdm_post_exec_opt_in.clone())
+            .with_operator_sdm_opt_in(self.operator_sdm_opt_in.clone())
             .with_enable_tx_conditional(self.args.enable_tx_conditional)
             .with_min_suggested_priority_fee(self.args.min_suggested_priority_fee)
             .with_historical_rpc(self.args.historical_rpc.clone())
             .with_flashblocks(self.args.flashblocks_url.clone())
             .with_flashblock_consensus(self.args.flashblock_consensus)
+            .with_retain_forwarded_txs(self.args.retain_forwarded_txs)
             .build()
     }
 }
