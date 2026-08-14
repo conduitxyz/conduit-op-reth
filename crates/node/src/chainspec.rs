@@ -38,13 +38,24 @@ pub struct StateOverrideFork0Config {
     pub updates: HashMap<Address, StateOverrideAccount>,
 }
 
+/// EVM limits to apply when EvmLimitsFork0 activates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvmLimitsFork0Config {
+    /// Optional maximum deployed contract bytecode size.
+    pub max_code_size: Option<usize>,
+    /// Optional maximum transaction initcode size.
+    pub max_initcode_size: Option<usize>,
+    /// Optional maximum gas allowed per transaction.
+    pub tx_gas_limit_cap: Option<u64>,
+}
+
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
 ///
 /// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list by default so they
-/// participate in fork IDs, fork filters, and `forks_iter()`. The `state_override_fork0` field
-/// carries the associated state update data consumed by the block executor. The activation
-/// condition is tracked separately because some legacy networks are excluded from registering the
-/// custom fork for fork ID compatibility.
+/// participate in fork IDs, fork filters, and `forks_iter()`. Dedicated configuration fields carry
+/// the transition data consumed when each custom fork activates. StateOverrideFork0's activation
+/// condition is tracked separately because some legacy networks exclude it from their fork IDs for
+/// compatibility.
 #[derive(Debug, Clone)]
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
@@ -53,6 +64,8 @@ pub struct ConduitOpChainSpec {
     pub state_override_fork0: Option<StateOverrideFork0Config>,
     /// Activation condition for StateOverrideFork0, tracked independently from fork IDs.
     state_override_fork0_activation: ForkCondition,
+    /// EVM limits applied when EvmLimitsFork0 is active (None if not configured).
+    pub evm_limits_fork0: Option<EvmLimitsFork0Config>,
 }
 
 impl EthChainSpec for ConduitOpChainSpec {
@@ -149,6 +162,7 @@ impl ConduitOpHardforks for ConduitOpChainSpec {
     fn conduit_op_fork_activation(&self, fork: ConduitOpHardfork) -> ForkCondition {
         match fork {
             ConduitOpHardfork::StateOverrideFork0 => self.state_override_fork0_activation,
+            ConduitOpHardfork::EvmLimitsFork0 => self.inner.fork(fork),
         }
     }
 }
@@ -160,16 +174,26 @@ struct GenesisExtraFields {
 }
 
 /// Raw JSON structure for the `"conduit"` section in genesis `config`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConduitOpGenesisConfig {
     state_override_fork0: Option<StateOverrideFork0Raw>,
+    evm_limits_fork0: Option<EvmLimitsFork0Raw>,
 }
 
 #[derive(Debug, Deserialize)]
 struct StateOverrideFork0Raw {
     time: u64,
     updates: HashMap<Address, StateOverrideAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EvmLimitsFork0Raw {
+    time: u64,
+    max_code_size: Option<usize>,
+    max_initcode_size: Option<usize>,
+    tx_gas_limit_cap: Option<u64>,
 }
 
 const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
@@ -210,12 +234,13 @@ fn use_legacy_genesis_header_for_known_chains(op_chain_spec: &mut OpChainSpec) -
 pub struct ConduitOpChainSpecParser;
 
 impl From<OpChainSpec> for ConduitOpChainSpec {
-    /// Wraps a plain [`OpChainSpec`] without any `StateOverrideFork0` configuration.
+    /// Wraps a plain [`OpChainSpec`] without any Conduit custom-fork configuration.
     fn from(inner: OpChainSpec) -> Self {
         Self {
             inner,
             state_override_fork0: None,
             state_override_fork0_activation: ForkCondition::Never,
+            evm_limits_fork0: None,
         }
     }
 }
@@ -241,7 +266,9 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             .deserialize_as()
             .map_err(|e| eyre::eyre!("failed to deserialize conduit config: {e}"))?;
 
-        let raw_fork0 = extras.conduit.and_then(|c| c.state_override_fork0);
+        let conduit_config = extras.conduit.unwrap_or_default();
+        let raw_fork0 = conduit_config.state_override_fork0;
+        let raw_evm_limits_fork0 = conduit_config.evm_limits_fork0;
 
         // Convert genesis to OpChainSpec (handles all OP hardfork parsing).
         let mut op_chain_spec: OpChainSpec = genesis.into();
@@ -276,10 +303,62 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             config
         });
 
+        let evm_limits_fork0 = if let Some(raw) = raw_evm_limits_fork0 {
+            match op_chain_spec.op_fork_activation(OpHardfork::Karst) {
+                ForkCondition::Timestamp(_) => {}
+                condition => {
+                    return Err(eyre::eyre!(
+                        "EvmLimitsFork0 requires Karst to be timestamp-scheduled, got {condition:?}"
+                    ));
+                }
+            }
+
+            let genesis_timestamp = op_chain_spec.genesis_header().timestamp;
+            if raw.time <= genesis_timestamp {
+                return Err(eyre::eyre!(
+                    "EvmLimitsFork0 timestamp {} must be after genesis timestamp {}",
+                    raw.time,
+                    genesis_timestamp
+                ));
+            }
+
+            if raw.max_code_size.is_none() &&
+                raw.max_initcode_size.is_none() &&
+                raw.tx_gas_limit_cap.is_none()
+            {
+                return Err(eyre::eyre!("EvmLimitsFork0 must configure at least one EVM limit"));
+            }
+
+            if let Some(conflicting_fork) =
+                op_chain_spec.inner.hardforks.forks_iter().find_map(|(fork, condition)| {
+                    (condition == ForkCondition::Timestamp(raw.time)).then(|| fork.name())
+                })
+            {
+                return Err(eyre::eyre!(
+                    "EvmLimitsFork0 timestamp {} conflicts with {conflicting_fork}; a distinct timestamp is required for a new fork ID",
+                    raw.time
+                ));
+            }
+
+            op_chain_spec
+                .inner
+                .hardforks
+                .insert(ConduitOpHardfork::EvmLimitsFork0, ForkCondition::Timestamp(raw.time));
+
+            Some(EvmLimitsFork0Config {
+                max_code_size: raw.max_code_size,
+                max_initcode_size: raw.max_initcode_size,
+                tx_gas_limit_cap: raw.tx_gas_limit_cap,
+            })
+        } else {
+            None
+        };
+
         Ok(Arc::new(ConduitOpChainSpec {
             inner: op_chain_spec,
             state_override_fork0,
             state_override_fork0_activation,
+            evm_limits_fork0,
         }))
     }
 }
@@ -320,16 +399,19 @@ mod tests {
         "alloc": {}
     }"#;
 
-    fn parse_spec(json: &str) -> Arc<ConduitOpChainSpec> {
+    fn try_parse_spec(json: &str) -> eyre::Result<Arc<ConduitOpChainSpec>> {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("conduit-op-reth-test-{id}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("genesis.json");
         std::fs::write(&path, json).unwrap();
-        let spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap())
-            .expect("failed to parse genesis");
+        let spec = ConduitOpChainSpecParser::parse(path.to_str().unwrap());
         std::fs::remove_dir_all(&dir).ok();
         spec
+    }
+
+    fn parse_spec(json: &str) -> Arc<ConduitOpChainSpec> {
+        try_parse_spec(json).expect("failed to parse genesis")
     }
 
     fn with_conduit_fork(time: u64) -> String {
@@ -351,6 +433,22 @@ mod tests {
         let mut genesis: serde_json::Value =
             serde_json::from_str(&with_conduit_fork(time)).unwrap();
         genesis["config"]["chainId"] = serde_json::json!(chain_id);
+        serde_json::to_string(&genesis).unwrap()
+    }
+
+    fn with_evm_limits_fork(karst_time: Option<u64>, fork_time: u64) -> String {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        if let Some(karst_time) = karst_time {
+            genesis["config"]["karstTime"] = serde_json::json!(karst_time);
+        }
+        genesis["config"]["conduit"] = serde_json::json!({
+            "evmLimitsFork0": {
+                "time": fork_time,
+                "maxCodeSize": 1_000_000,
+                "maxInitcodeSize": 2_000_000,
+                "txGasLimitCap": u64::MAX
+            }
+        });
         serde_json::to_string(&genesis).unwrap()
     }
 
@@ -436,6 +534,145 @@ mod tests {
             spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
             ForkCondition::Never,
         );
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::EvmLimitsFork0),
+            ForkCondition::Never,
+        );
+        assert!(spec.evm_limits_fork0.is_none());
+    }
+
+    #[test]
+    fn parse_evm_limits_fork() {
+        let spec = parse_spec(&with_evm_limits_fork(Some(1000), 2000));
+
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::EvmLimitsFork0),
+            ForkCondition::Timestamp(2000),
+        );
+        assert!(!spec.is_evm_limits_fork0_active_at_timestamp(1999));
+        assert!(spec.is_evm_limits_fork0_active_at_timestamp(2000));
+        assert_eq!(
+            spec.evm_limits_fork0,
+            Some(EvmLimitsFork0Config {
+                max_code_size: Some(1_000_000),
+                max_initcode_size: Some(2_000_000),
+                tx_gas_limit_cap: Some(u64::MAX),
+            })
+        );
+
+        let names: Vec<&str> = spec.forks_iter().map(|(fork, _)| fork.name()).collect();
+        assert!(names.contains(&"EvmLimitsFork0"));
+
+        let before = spec.fork_id(&head_at(1999));
+        let active = spec.fork_id(&head_at(2000));
+        assert_eq!(before.next, 2000);
+        assert_ne!(before.hash, active.hash);
+        assert_eq!(active.next, 0);
+        assert_eq!(spec.fork_filter(head_at(1999)).current(), before);
+        assert_eq!(spec.fork_filter(head_at(2000)).current(), active);
+    }
+
+    #[test]
+    fn evm_limits_fork_requires_karst() {
+        let err = try_parse_spec(&with_evm_limits_fork(None, 2000)).unwrap_err();
+        assert!(err.to_string().contains("requires Karst to be timestamp-scheduled"));
+    }
+
+    #[test]
+    fn evm_limits_fork_can_activate_before_karst() {
+        let spec = parse_spec(&with_evm_limits_fork(Some(1000), 500));
+
+        assert!(spec.is_evm_limits_fork0_active_at_timestamp(500));
+        assert!(!spec.is_karst_active_at_timestamp(999));
+        assert!(spec.is_evm_limits_fork0_active_at_timestamp(1000));
+        assert!(spec.is_karst_active_at_timestamp(1000));
+
+        let before = spec.fork_id(&head_at(499));
+        let custom_fork = spec.fork_id(&head_at(500));
+        let karst = spec.fork_id(&head_at(1000));
+        assert_eq!(before.next, 500);
+        assert_eq!(custom_fork.next, 1000);
+        assert_eq!(karst.next, 0);
+        assert_ne!(before.hash, custom_fork.hash);
+        assert_ne!(custom_fork.hash, karst.hash);
+    }
+
+    #[test]
+    fn evm_limits_fork_must_be_after_genesis() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_evm_limits_fork(Some(1000), 1500)).unwrap();
+        genesis["timestamp"] = serde_json::json!("0x5dc");
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("must be after genesis timestamp 1500"));
+    }
+
+    #[test]
+    fn evm_limits_fork_requires_distinct_fork_id_timestamp() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
+        genesis["config"]["conduit"]["stateOverrideFork0"] = serde_json::json!({
+            "time": 2000,
+            "updates": {}
+        });
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("conflicts with StateOverrideFork0"));
+        assert!(err.to_string().contains("distinct timestamp is required for a new fork ID"));
+    }
+
+    #[test]
+    fn evm_limits_fork_accepts_omitted_and_null_limits() {
+        let genesis = with_evm_limits_fork(Some(1000), 2000);
+
+        let mut omitted_tx_cap: serde_json::Value = serde_json::from_str(&genesis).unwrap();
+        omitted_tx_cap["config"]["conduit"]["evmLimitsFork0"]
+            .as_object_mut()
+            .unwrap()
+            .remove("txGasLimitCap");
+        let spec = parse_spec(&serde_json::to_string(&omitted_tx_cap).unwrap());
+        assert_eq!(spec.evm_limits_fork0.unwrap().tx_gas_limit_cap, None);
+
+        for field in ["maxCodeSize", "maxInitcodeSize", "txGasLimitCap"] {
+            let mut null: serde_json::Value = serde_json::from_str(&genesis).unwrap();
+            null["config"]["conduit"]["evmLimitsFork0"][field] = serde_json::Value::Null;
+            assert!(try_parse_spec(&serde_json::to_string(&null).unwrap()).is_ok());
+        }
+    }
+
+    #[test]
+    fn evm_limits_fork_requires_at_least_one_limit() {
+        for limits in [
+            serde_json::json!({ "time": 2000 }),
+            serde_json::json!({
+                "time": 2000,
+                "maxCodeSize": null,
+                "maxInitcodeSize": null,
+                "txGasLimitCap": null,
+            }),
+        ] {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
+            genesis["config"]["conduit"]["evmLimitsFork0"] = limits;
+
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+            assert!(err.to_string().contains("must configure at least one EVM limit"));
+        }
+    }
+
+    #[test]
+    fn evm_limits_fork_accepts_arbitrary_code_size_limits() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
+        genesis["config"]["conduit"]["evmLimitsFork0"]["maxCodeSize"] =
+            serde_json::json!(usize::MAX);
+        genesis["config"]["conduit"]["evmLimitsFork0"]["maxInitcodeSize"] =
+            serde_json::json!(usize::MAX);
+
+        let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+        let limits = spec.evm_limits_fork0.unwrap();
+        assert_eq!(limits.max_code_size, Some(usize::MAX));
+        assert_eq!(limits.max_initcode_size, Some(usize::MAX));
     }
 
     #[test]

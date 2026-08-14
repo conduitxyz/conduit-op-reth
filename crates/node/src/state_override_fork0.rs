@@ -110,6 +110,7 @@ mod tests {
                     Some(t) => ForkCondition::Timestamp(t),
                     None => ForkCondition::Never,
                 },
+                ConduitOpHardfork::EvmLimitsFork0 => ForkCondition::Never,
             }
         }
     }

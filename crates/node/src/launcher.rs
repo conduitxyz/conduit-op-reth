@@ -8,6 +8,7 @@
 use crate::{
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
+    hardforks::{ConduitOpHardfork, ConduitOpHardforks},
     node::ConduitOpNode,
     slipstream::SlipstreamProxy,
 };
@@ -33,7 +34,7 @@ use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Launches a Conduit OP-Reth node, optionally installing the proof-history ExEx and RPC
 /// overrides.
@@ -43,6 +44,21 @@ pub async fn launch_node(
     slipstream_enabled: bool,
 ) -> eyre::Result<(), ErrReport> {
     validate_slipstream_config(&args, slipstream_enabled)?;
+    let config = builder.config();
+    if let Some(max_initcode_size) =
+        config.chain.evm_limits_fork0.and_then(|limits| limits.max_initcode_size) &&
+        max_initcode_size >= config.txpool.max_tx_input_bytes
+    {
+        let max_tx_input_bytes = config.txpool.max_tx_input_bytes;
+        let activation = config.chain.conduit_op_fork_activation(ConduitOpHardfork::EvmLimitsFork0);
+        warn!(
+            target: "reth::cli",
+            max_initcode_size,
+            max_tx_input_bytes,
+            ?activation,
+            "EvmLimitsFork0 permits initcode that the configured transaction pool cannot admit; raise --txpool.max-tx-input-bytes and restart the node"
+        );
+    }
 
     if !args.proofs_history {
         let flashblocks_enabled = args.flashblocks_url.is_some();
