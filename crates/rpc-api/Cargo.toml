@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+alloy-eips = { workspace = true, features = ["serde"] }
 alloy-primitives = { workspace = true, features = ["serde"] }
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
 serde.workspace = true
