@@ -8,6 +8,11 @@
 # Dev mode datadir
 .devdata/
 
+# cargo-chef dependency recipe. Generated in the Dockerfile's planner stage and
+# copied into the build tree, where an untracked file would make vergen report
+# the git tree as dirty and append "-dev" to the release version string.
+recipe.json
+
 # Coverage reports
 lcov.info
 target/llvm-cov/
