@@ -37,4 +37,4 @@ This builds a debug binary, clears any previous state, and starts the node using
 
 ## License
 
-TBD
+Licensed under the [Apache License, Version 2.0](LICENSE).
