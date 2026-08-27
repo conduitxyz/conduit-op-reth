@@ -2442,6 +2442,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-revm",
  "reth-rpc-eth-api",
+ "reth-rpc-eth-types",
  "reth-tasks",
  "revm",
  "serde",
