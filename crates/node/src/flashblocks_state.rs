@@ -34,6 +34,7 @@ use reth_rpc_eth_api::{
     FromEvmError, RpcBlock, RpcConvert, RpcNodeCore, RpcTxReq,
     helpers::{EthCall, FullEthApi},
 };
+use reth_rpc_eth_types::{EthApiError, simulate::EthSimulateError};
 use tracing::trace;
 
 /// Provides the state of the current pending flashblock as a [`StateOverride`] anchored
@@ -311,6 +312,10 @@ where
         opts: SimulatePayload<RpcTxReq<Eth::NetworkTypes>>,
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<Eth::NetworkTypes>>>> {
+        if opts.block_state_calls.len() > self.eth_api.max_simulate_blocks() as usize {
+            return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into());
+        }
+
         let (block_id, flashblock_overrides, flashblock_block_overrides) =
             self.resolve_pending(block_number).await;
 
