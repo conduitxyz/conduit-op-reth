@@ -64,8 +64,7 @@ FROM builder AS conduit-op-reth-build
 ARG FEATURES
 ARG BUILD_PROFILE=maxperf
 
-# These revisions must stay aligned with Cargo.lock and Optimism's superchain-registry pin.
-# Setting OP_RETH_SYNC_SUPERCHAIN to 0 reruns upstream generation without rewriting its SHA pin.
+# Keep revisions aligned; 0 forces verified generation without updating the SHA pin.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
