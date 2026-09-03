@@ -69,6 +69,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     set -eux; \
+    cargo fetch --locked; \
     optimism_checkout="$CARGO_HOME/git/checkouts/optimism-852bcbde357560e3/f863ff4"; \
     test "$(git -C "$optimism_checkout" rev-parse HEAD)" = "f863ff4c12531b315d666331d43da3aeb3719388"; \
     git -C "$optimism_checkout" submodule update --init --depth 1 -- superchain-registry; \
