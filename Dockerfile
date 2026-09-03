@@ -67,6 +67,18 @@ ARG BUILD_PROFILE=maxperf
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
+    set -eux; \
+    optimism_rev="$(grep -m1 'git+https://github.com/ethereum-optimism/optimism' Cargo.lock | sed -E 's/.*#([0-9a-f]{40})".*/\1/')"; \
+    optimism_checkout=""; \
+    for checkout in "$CARGO_HOME"/git/checkouts/optimism-*/*; do \
+        if [ -d "$checkout" ] && [ "$(git -C "$checkout" rev-parse HEAD)" = "$optimism_rev" ]; then \
+            optimism_checkout="$checkout"; \
+            break; \
+        fi; \
+    done; \
+    test -n "$optimism_checkout"; \
+    git -C "$optimism_checkout" submodule update --init --depth 1 -- superchain-registry; \
+    touch "$optimism_checkout/rust/op-reth/crates/chainspec/build.rs"; \
     cargo build --locked --profile $BUILD_PROFILE --features="$FEATURES" --package=conduit-op-reth
 
 #
