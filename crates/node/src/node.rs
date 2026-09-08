@@ -207,3 +207,74 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{SignableTransaction, TxEip1559, TxLegacy};
+    use alloy_eips::{Decodable2718, Encodable2718};
+    use alloy_primitives::{B256, Bytes, Signature};
+    use op_alloy_consensus::{OpTxEnvelope, TxDeposit, build_post_exec_tx};
+    use op_alloy_rpc_types_engine::{OpPayloadAttributes, flashblock::OpFlashblockPayload};
+    use reth_optimism_payload_builder::OpPayloadBuilderAttributes;
+    use reth_primitives_traits::NodePrimitives;
+
+    /// Exercise the payload/flashblock boundaries with the exact transaction type our node
+    /// uses, rather than only testing the upstream canonical-decoding helper in isolation.
+    #[test]
+    fn payloads_and_flashblocks_require_canonical_transactions() {
+        type Tx = <OpPrimitives as NodePrimitives>::SignedTx;
+        let typed = TxEip1559 {
+            chain_id: 10,
+            nonce: 1,
+            gas_limit: 21_000,
+            max_fee_per_gas: 2,
+            max_priority_fee_per_gas: 1,
+            ..Default::default()
+        }
+        .into_signed(Signature::test_signature())
+        .encoded_2718();
+        let legacy = TxLegacy::default().into_signed(Signature::test_signature()).encoded_2718();
+        let deposit = TxDeposit::default().encoded_2718();
+        let post_exec = build_post_exec_tx(7, vec![]).encoded_2718();
+
+        // Generic typed decoders previously accepted some missing-type-byte encodings;
+        // merely checking successful RLP decoding is not a canonicality check.
+        for canonical in [typed, deposit, post_exec, legacy] {
+            let mut trailing = canonical.clone();
+            trailing.push(0);
+            let malformed = if canonical[0] < 0x80 {
+                canonical[1..].to_vec()
+            } else {
+                [vec![0], canonical.clone()].concat()
+            };
+            for (encoded, valid) in [(canonical, true), (malformed, false), (trailing, false)] {
+                let bytes = Bytes::from(encoded);
+                let attrs = OpPayloadAttributes {
+                    transactions: Some(vec![bytes.clone()]),
+                    ..Default::default()
+                };
+                let decoded = attrs.decoded_transactions().next().unwrap();
+                assert_eq!(decoded.is_ok(), valid, "attributes: {bytes}");
+                let built = OpPayloadBuilderAttributes::<Tx>::try_new(B256::ZERO, attrs, 3);
+                assert_eq!(built.is_ok(), valid, "builder: {bytes}");
+
+                let mut flashblock = OpFlashblockPayload::default();
+                flashblock.diff.transactions = vec![bytes.clone()];
+                let streamed = flashblock.decoded_transaction::<Tx>().next().unwrap();
+                assert_eq!(streamed.is_ok(), valid, "flashblock: {bytes}");
+                if valid {
+                    assert_eq!(decoded.unwrap().encoded_2718().as_slice(), bytes.as_ref());
+                    assert_eq!(streamed.unwrap().encoded_2718().as_slice(), bytes.as_ref());
+                    assert_eq!(built.unwrap().transactions.len(), 1);
+                }
+            }
+        }
+
+        // The concrete deposit decoder must not accept a bare body either.
+        let deposit = TxDeposit::default().encoded_2718();
+        assert!(TxDeposit::decode_2718_exact(&deposit).is_ok());
+        assert!(TxDeposit::decode_2718_exact(&deposit[1..]).is_err());
+        assert!(OpTxEnvelope::decode_2718_exact(&deposit).is_ok());
+    }
+}

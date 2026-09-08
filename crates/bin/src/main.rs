@@ -3,7 +3,7 @@
 mod commands;
 mod version;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use commands::ConduitSubCommand;
 use conduit_op_reth_node::{
     chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser},
@@ -17,9 +17,12 @@ use reth_node_builder::{NodeBuilder, WithLaunchContext};
 use reth_optimism_consensus::OpBeaconConsensus;
 use reth_optimism_node::args::RollupArgs;
 use reth_rpc_server_types::DefaultRpcModuleValidator;
-use std::sync::Arc;
+use std::{ffi::OsString, sync::Arc};
 use tracing::info;
 use version::init_conduit_version;
+
+type ConduitCli =
+    Cli<ConduitOpChainSpecParser, ConduitRollupArgs, DefaultRpcModuleValidator, ConduitSubCommand>;
 
 /// Conduit-specific node arguments layered on the upstream OP-Reth rollup arguments.
 #[derive(Debug, Clone, clap::Args)]
@@ -36,6 +39,35 @@ struct ConduitRollupArgs {
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
+/// Mirror op-reth's denied-argument parsing while retaining the generic Reth CLI's custom
+/// subcommands and Conduit execution components. Reevaluate alongside upstream `DENIED_ARGS`.
+fn try_parse_cli_from<I, T>(args: I) -> Result<ConduitCli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let mut command = ConduitCli::command().mut_subcommands(|subcommand| {
+        if subcommand.get_name() == "node" {
+            subcommand.mut_args(|arg| if arg.get_id() == "minimal" { arg.hide(true) } else { arg })
+        } else {
+            subcommand
+        }
+    });
+    let mut matches = command.try_get_matches_from_mut(args)?;
+    if let Some(node) = matches.subcommand_matches("node") &&
+        node.value_source("minimal") == Some(clap::parser::ValueSource::CommandLine)
+    {
+        return Err(command.error(
+            clap::error::ErrorKind::ValueValidation,
+            "--minimal is not supported by conduit-op-reth: pruning block bodies breaks op-node derivation.\n\
+             Use --prune.minimum-distance, --prune.receipts.distance, \
+             --prune.account-history.distance and --prune.storage-history.distance instead.\n\
+             Do NOT prune block bodies. Resync datadirs previously pruned with --minimal.",
+        ));
+    }
+    ConduitCli::from_arg_matches_mut(&mut matches)
+}
+
 fn main() {
     reth_cli_util::sigsegv_handler::install();
 
@@ -48,13 +80,9 @@ fn main() {
         }
     }
 
-    if let Err(err) = Cli::<
-        ConduitOpChainSpecParser,
-        ConduitRollupArgs,
-        DefaultRpcModuleValidator,
-        ConduitSubCommand,
-    >::parse()
-    .run_with_components::<ConduitOpNode>(
+    if let Err(err) = try_parse_cli_from(std::env::args_os())
+        .unwrap_or_else(|err| err.exit())
+        .run_with_components::<ConduitOpNode>(
         |spec: Arc<ConduitOpChainSpec>| {
             (ConduitOpEvmConfig::new(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
         },
@@ -73,12 +101,52 @@ fn main() {
 mod tests {
     use super::*;
 
-    type ConduitCli = Cli<
-        ConduitOpChainSpecParser,
-        ConduitRollupArgs,
-        DefaultRpcModuleValidator,
-        ConduitSubCommand,
-    >;
+    #[test]
+    fn minimal_is_rejected_and_hidden_but_full_is_supported() {
+        let error = try_parse_cli_from(["conduit-op-reth", "node", "--minimal"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(error.to_string().contains("pruning block bodies breaks op-node derivation"));
+        assert!(error.to_string().contains("--prune.receipts.distance"));
+
+        let help = try_parse_cli_from(["conduit-op-reth", "node", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(!help.to_string().contains("--minimal"));
+        assert!(help.to_string().contains("--full"));
+
+        let cli = try_parse_cli_from(["conduit-op-reth", "node", "--full"]).unwrap();
+        let reth_ethereum_cli::Commands::Node(command) = cli.command else {
+            panic!("expected node command")
+        };
+        assert!(command.pruning.full);
+        assert!(!command.pruning.minimal);
+    }
+
+    #[test]
+    fn subblocks_aliases_preserve_flashblocks_configuration() {
+        for url_flag in ["--flashblocks-url", "--websocket-url", "--subblocks-url"] {
+            for consensus_flag in ["--flashblock-consensus", "--subblocks-consensus"] {
+                let cli = try_parse_cli_from([
+                    "conduit-op-reth",
+                    "node",
+                    url_flag,
+                    "ws://localhost:8546",
+                    consensus_flag,
+                ])
+                .unwrap();
+                let reth_ethereum_cli::Commands::Node(command) = cli.command else {
+                    panic!("expected node command")
+                };
+                assert_eq!(
+                    command.ext.rollup.flashblocks_url.unwrap().as_str(),
+                    "ws://localhost:8546/"
+                );
+                assert!(command.ext.rollup.flashblock_consensus);
+            }
+        }
+        let error =
+            try_parse_cli_from(["conduit-op-reth", "node", "--subblocks-consensus"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
 
     /// Upgrade tripwire for the CLI surface of the upstream `proofs` commands: operators'
     /// runbooks depend on these subcommands and flag names. If an op-reth version bump
@@ -131,7 +199,7 @@ mod tests {
         for case in cases {
             let mut args = vec!["conduit-op-reth"];
             args.extend_from_slice(case);
-            if let Err(err) = <ConduitCli as clap::Parser>::try_parse_from(&args) {
+            if let Err(err) = try_parse_cli_from(&args) {
                 panic!("failed to parse {case:?}: {err}");
             }
         }
@@ -150,13 +218,12 @@ mod tests {
             "--proofs-history.storage-version",
             "v1",
         ];
-        <ConduitCli as clap::Parser>::try_parse_from(node_args)
-            .expect("node proofs-history flags must parse");
+        try_parse_cli_from(node_args).expect("node proofs-history flags must parse");
     }
 
     #[test]
     fn slipstream_batch_proxy_flag_parses() {
-        let cli = <ConduitCli as clap::Parser>::try_parse_from([
+        let cli = try_parse_cli_from([
             "conduit-op-reth",
             "node",
             "--conduit.slipstream",
