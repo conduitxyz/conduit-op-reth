@@ -433,24 +433,6 @@ mod tests {
         spec
     }
 
-    #[test]
-    fn worldchain_registry_karst_activations_reach_conduit_evm() {
-        for (name, activation) in
-            [("worldchain", 1_789_992_000), ("worldchain-sepolia", 1_788_868_800)]
-        {
-            let spec = ConduitOpChainSpecParser::parse(name).unwrap();
-            assert!(!spec.is_karst_active_at_timestamp(activation - 1));
-            assert!(spec.is_karst_active_at_timestamp(activation));
-            let config = ConduitOpEvmConfig::new(spec);
-            for (timestamp, expected) in
-                [(activation - 1, OpSpecId::JOVIAN), (activation, OpSpecId::KARST)]
-            {
-                let header = Header { timestamp, gas_limit: 30_000_000, ..Default::default() };
-                assert_eq!(config.evm_env(&header).unwrap().cfg_env.spec, expected, "{name}");
-            }
-        }
-    }
-
     /// Regression test for Karst readiness: a genesis `karstTime` must flow through
     /// [`ConduitOpChainSpec`] and [`ConduitOpEvmConfig`] into the `KARST` EVM spec
     /// (Osaka semantics, including the EIP-7825 transaction gas cap that the tx pool

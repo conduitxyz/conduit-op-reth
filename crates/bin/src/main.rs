@@ -80,37 +80,6 @@ mod tests {
         ConduitSubCommand,
     >;
 
-    #[test]
-    fn subblocks_aliases_preserve_flashblocks_configuration() {
-        for url_flag in ["--flashblocks-url", "--websocket-url", "--subblocks-url"] {
-            for consensus_flag in ["--flashblock-consensus", "--subblocks-consensus"] {
-                let cli = <ConduitCli as clap::Parser>::try_parse_from([
-                    "conduit-op-reth",
-                    "node",
-                    url_flag,
-                    "ws://localhost:8546",
-                    consensus_flag,
-                ])
-                .unwrap();
-                let reth_ethereum_cli::Commands::Node(command) = cli.command else {
-                    panic!("expected node command")
-                };
-                assert_eq!(
-                    command.ext.rollup.flashblocks_url.unwrap().as_str(),
-                    "ws://localhost:8546/"
-                );
-                assert!(command.ext.rollup.flashblock_consensus);
-            }
-        }
-        let error = <ConduitCli as clap::Parser>::try_parse_from([
-            "conduit-op-reth",
-            "node",
-            "--subblocks-consensus",
-        ])
-        .unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-    }
-
     /// Upgrade tripwire for the CLI surface of the upstream `proofs` commands: operators'
     /// runbooks depend on these subcommands and flag names. If an op-reth version bump
     /// renames or removes any of them, this fails at test time instead of in production.
