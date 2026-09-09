@@ -65,14 +65,15 @@ ARG FEATURES
 ARG BUILD_PROFILE=maxperf
 
 # Keep revisions aligned; 0 forces verified generation without updating the SHA pin.
+# Both revisions track the `op-reth/vX.Y.Z` tag in Cargo.toml; bump them together with it.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     set -eux; \
     cargo fetch --locked; \
-    optimism_checkout="$CARGO_HOME/git/checkouts/optimism-852bcbde357560e3/f863ff4"; \
-    test "$(git -C "$optimism_checkout" rev-parse HEAD)" = "f863ff4c12531b315d666331d43da3aeb3719388"; \
-    test "$(git -C "$optimism_checkout/superchain-registry" rev-parse HEAD)" = "7715c7dc14049b9b2162b8e166fbf89b7ae5ab69"; \
+    optimism_checkout="$CARGO_HOME/git/checkouts/optimism-852bcbde357560e3/b60a1a6"; \
+    test "$(git -C "$optimism_checkout" rev-parse HEAD)" = "b60a1a6398209ccc47267e77deb6e4bf4c1ede8a"; \
+    test "$(git -C "$optimism_checkout/superchain-registry" rev-parse HEAD)" = "08d6a44910d75e28a5ee1c7c047d3bdd0bbdbdd2"; \
     OP_RETH_SYNC_SUPERCHAIN=0 cargo build --locked --profile $BUILD_PROFILE --features="$FEATURES" --package=conduit-op-reth
 
 #

@@ -207,3 +207,89 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_eips::{Decodable2718, Encodable2718};
+    use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
+    use op_alloy_consensus::TxDeposit;
+    use op_alloy_rpc_types_engine::{OpPayloadAttributes, flashblock::OpFlashblockPayload};
+    use reth_optimism_payload_builder::OpPayloadBuilderAttributes;
+    use reth_primitives_traits::NodePrimitives;
+
+    type Tx = <<ConduitOpNode as NodeTypes>::Primitives as NodePrimitives>::SignedTx;
+
+    fn deposit() -> TxDeposit {
+        TxDeposit {
+            source_hash: B256::with_last_byte(2),
+            from: Address::repeat_byte(0x42),
+            to: TxKind::Call(Address::repeat_byte(0x43)),
+            mint: u128::MAX,
+            value: U256::from(1_000_000_000_000_000_000u128),
+            gas_limit: 50_000,
+            is_system_transaction: false,
+            input: Bytes::from_static(&[0x12, 0x34]),
+        }
+    }
+
+    /// Untyped dispatch must not infer a deposit from its RLP fields. Use the node's
+    /// actual signed transaction type for both EIP-2718 and network decoding.
+    #[test]
+    fn deposit_decoders_require_type_prefix() {
+        let deposit = deposit();
+        let canonical = deposit.encoded_2718();
+        assert_eq!(canonical[0], 0x7e);
+        assert_eq!(TxDeposit::decode_2718_exact(&canonical).unwrap(), deposit);
+        let decoded = Tx::decode_2718_exact(&canonical).unwrap();
+        assert!(decoded.is_deposit());
+        assert_eq!(decoded.encoded_2718(), canonical);
+
+        let mut network = Vec::new();
+        deposit.network_encode(&mut network);
+        let mut input = network.as_slice();
+        assert_eq!(Tx::network_decode(&mut input).unwrap().encoded_2718(), canonical);
+        assert!(input.is_empty());
+
+        let bare = &canonical[1..];
+        assert!(bare[0] >= 0xc0, "fixture must be an untyped RLP list");
+        let decoded = Tx::decode_2718_exact(bare);
+        assert!(decoded.is_err(), "bare deposit body was accepted: {decoded:?}");
+        assert!(Tx::network_decode(&mut &bare[..]).is_err());
+        assert!(TxDeposit::decode_2718_exact(bare).is_err());
+    }
+
+    #[test]
+    fn payloads_and_flashblocks_reject_unprefixed_deposits() {
+        let canonical = deposit().encoded_2718();
+        let bare = canonical[1..].to_vec();
+        let mut trailing = canonical.clone();
+        trailing.push(0);
+
+        for (encoded, valid) in [(canonical, true), (bare, false), (trailing, false)] {
+            let bytes = Bytes::from(encoded);
+            let attrs = OpPayloadAttributes {
+                transactions: Some(vec![bytes.clone()]),
+                ..Default::default()
+            };
+            let decoded = attrs.decoded_transactions().next().unwrap();
+            assert_eq!(decoded.is_ok(), valid, "attributes: {bytes}");
+            let built = OpPayloadBuilderAttributes::<Tx>::try_new(B256::ZERO, attrs, 3);
+            assert_eq!(built.is_ok(), valid, "builder: {bytes}");
+
+            let mut flashblock = OpFlashblockPayload::default();
+            flashblock.diff.transactions = vec![bytes.clone()];
+            let streamed = flashblock.decoded_transaction::<Tx>().next().unwrap();
+            assert_eq!(streamed.is_ok(), valid, "flashblock: {bytes}");
+            let recovered = flashblock.recover_transactions::<Tx>().next().unwrap();
+            assert_eq!(recovered.is_ok(), valid, "flashblock recovery: {bytes}");
+            if valid {
+                assert_eq!(decoded.unwrap().encoded_2718().as_slice(), bytes.as_ref());
+                assert_eq!(streamed.unwrap().encoded_2718().as_slice(), bytes.as_ref());
+                let built = built.unwrap();
+                assert_eq!(built.transactions.len(), 1);
+                assert_eq!(built.transactions[0].value().encoded_2718().as_slice(), bytes.as_ref());
+            }
+        }
+    }
+}
