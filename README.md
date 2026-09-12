@@ -35,6 +35,25 @@ make dev
 
 This builds a debug binary, clears any previous state, and starts the node using the Saigon test genesis.
 
+### Historical RPC for migrated chains
+
+Use the first locally served block as the exclusive historical RPC cutoff:
+
+```bash
+conduit-op-reth node --chain genesis.json \
+  --rollup.historicalrpc https://historical.example.com \
+  --rollup.historicalrpc.block 32956469
+```
+
+The existing upstream historical RPC middleware forwards supported requests for blocks below
+`32956469`; the cutoff block and later blocks are served locally. The override also works when
+Bedrock activated at block zero. It does not change the genesis, hardfork activation, or peer fork ID.
+
+Omit `--rollup.historicalrpc.block` to preserve upstream behavior: use `bedrockBlock` as the cutoff,
+with forwarding disabled when Bedrock has no positive block activation. The override requires
+`--rollup.historicalrpc`. Upstream method coverage, unknown-hash forwarding, and fallback behavior
+are unchanged; an explicit cutoff of zero does not disable unknown-hash forwarding.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

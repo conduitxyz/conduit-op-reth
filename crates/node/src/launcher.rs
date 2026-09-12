@@ -42,6 +42,7 @@ pub async fn launch_node(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
     args: RollupArgs,
     slipstream_enabled: bool,
+    historical_rpc_block: Option<u64>,
 ) -> eyre::Result<(), ErrReport> {
     validate_slipstream_config(&args, slipstream_enabled)?;
     let config = builder.config();
@@ -62,8 +63,10 @@ pub async fn launch_node(
 
     if !args.proofs_history {
         let flashblocks_enabled = args.flashblocks_url.is_some();
+        let mut node = ConduitOpNode::new(args);
+        node.historical_rpc_block = historical_rpc_block;
         let handle = builder
-            .node(ConduitOpNode::new(args))
+            .node(node)
             .extend_rpc_modules(move |mut ctx| {
                 let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
                 install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
@@ -84,7 +87,8 @@ pub async fn launch_node(
                 MdbxProofsStorage::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorage: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx, slipstream_enabled).await
+            launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc_block)
+                .await
         }
         ProofsStorageVersion::V2 => {
             info!(target: "reth::cli", "Using on-disk storage for proofs history (v2)");
@@ -92,7 +96,8 @@ pub async fn launch_node(
                 MdbxProofsStorageV2::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorageV2: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx, slipstream_enabled).await
+            launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc_block)
+                .await
         }
     }
 }
@@ -103,6 +108,7 @@ async fn launch_with_proof_history<S>(
     args: RollupArgs,
     mdbx: Arc<S>,
     slipstream_enabled: bool,
+    historical_rpc_block: Option<u64>,
 ) -> eyre::Result<(), ErrReport>
 where
     S: OpProofsStore + DatabaseMetrics + Send + Sync + 'static,
@@ -114,9 +120,11 @@ where
         args.clone();
     let proofs_history_window = proofs_history_window.window;
     let flashblocks_enabled = args.flashblocks_url.is_some();
+    let mut node = ConduitOpNode::new(args);
+    node.historical_rpc_block = historical_rpc_block;
 
     let handle = builder
-        .node(ConduitOpNode::new(args))
+        .node(node)
         .on_node_started(move |node| {
             spawn_proofs_db_metrics(
                 node.task_executor,
