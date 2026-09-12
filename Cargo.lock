@@ -2443,6 +2443,7 @@ dependencies = [
  "reth-revm",
  "reth-rpc-eth-api",
  "reth-rpc-eth-types",
+ "reth-storage-api",
  "reth-tasks",
  "revm",
  "serde",
