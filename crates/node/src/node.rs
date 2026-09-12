@@ -1,11 +1,15 @@
 use crate::{chainspec::ConduitOpChainSpec, evm::ConduitOpExecutorBuilder};
 use reth_engine_local::LocalPayloadAttributesBuilder;
-use reth_node_api::{FullNodeComponents, PayloadAttributesBuilder, PayloadTypes};
+use reth_node_api::{
+    AddOnsContext, FullNodeComponents, NodeAddOns, PayloadAttributesBuilder, PayloadTypes,
+};
 use reth_node_builder::{
     DebugNode, Node, NodeAdapter, NodeComponentsBuilder, NodeTypes,
     components::{BasicPayloadServiceBuilder, ComponentsBuilder},
     node::FullNodeTypes,
-    rpc::BasicEngineValidatorBuilder,
+    rpc::{
+        BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, RethRpcAddOns, RpcHooks,
+    },
 };
 use reth_optimism_node::{
     OpDAConfig, OpEngineApiBuilder, OpEngineTypes, OpStorage,
@@ -20,7 +24,10 @@ use reth_optimism_payload_builder::{
     config::{OpBuilderConfig, OpGasLimitConfig, OperatorSdmOptIn},
 };
 use reth_optimism_primitives::OpPrimitives;
-use reth_optimism_rpc::eth::OpEthApiBuilder;
+use reth_optimism_rpc::{
+    eth::OpEthApiBuilder,
+    historical::{HistoricalRpc, HistoricalRpcClient},
+};
 use reth_optimism_txpool::interop::InteropFailsafe;
 use reth_primitives_traits::SealedHeader;
 use std::sync::Arc;
@@ -31,6 +38,8 @@ use std::sync::Arc;
 pub struct ConduitOpNode {
     /// Optimism rollup arguments.
     pub args: RollupArgs,
+    /// Exclusive historical RPC cutoff; `None` preserves upstream Bedrock routing.
+    pub historical_rpc_block: Option<u64>,
     /// Data availability configuration for the OP builder.
     ///
     /// Used to throttle the size of the data availability payloads (configured by the batcher via
@@ -57,6 +66,7 @@ impl ConduitOpNode {
         operator_sdm_opt_in.set(args.operator_sdm_opt_in);
         Self {
             args,
+            historical_rpc_block: None,
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
             operator_sdm_opt_in,
@@ -114,12 +124,8 @@ where
         OpConsensusBuilder,
     >;
 
-    type AddOns = OpAddOns<
+    type AddOns = ConduitOpAddOns<
         NodeAdapter<N, <Self::ComponentsBuilder as NodeComponentsBuilder<N>>::Components>,
-        OpEthApiBuilder,
-        OpEngineValidatorBuilder,
-        OpEngineApiBuilder<OpEngineValidatorBuilder>,
-        BasicEngineValidatorBuilder<OpEngineValidatorBuilder>,
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
@@ -147,7 +153,7 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        OpAddOnsBuilder::default()
+        let inner = OpAddOnsBuilder::default()
             .with_sequencer(self.args.sequencer.clone())
             .with_sequencer_headers(self.args.sequencer_headers.clone())
             .with_da_config(self.da_config.clone())
@@ -159,7 +165,74 @@ where
             .with_flashblocks(self.args.flashblocks_url.clone())
             .with_flashblock_consensus(self.args.flashblock_consensus)
             .with_retain_forwarded_txs(self.args.retain_forwarded_txs)
-            .build()
+            .build();
+        ConduitOpAddOns { inner, historical_rpc_block: self.historical_rpc_block }
+    }
+}
+
+type StandardOpAddOns<N, M = reth_node_builder::rpc::Identity> = OpAddOns<
+    N,
+    OpEthApiBuilder,
+    OpEngineValidatorBuilder,
+    OpEngineApiBuilder<OpEngineValidatorBuilder>,
+    BasicEngineValidatorBuilder<OpEngineValidatorBuilder>,
+    M,
+>;
+
+/// Keeps upstream add-ons intact while allowing an independent historical RPC cutoff.
+pub struct ConduitOpAddOns<N: FullNodeComponents>
+where
+    OpEthApiBuilder: EthApiBuilder<N>,
+{
+    inner: StandardOpAddOns<N>,
+    historical_rpc_block: Option<u64>,
+}
+
+impl<N: FullNodeComponents> NodeAddOns<N> for ConduitOpAddOns<N>
+where
+    OpEthApiBuilder: EthApiBuilder<N>,
+    StandardOpAddOns<N>: NodeAddOns<N>,
+    StandardOpAddOns<N, HistoricalRpc<N::Provider>>:
+        NodeAddOns<N, Handle = <StandardOpAddOns<N> as NodeAddOns<N>>::Handle>,
+{
+    type Handle = <StandardOpAddOns<N> as NodeAddOns<N>>::Handle;
+
+    async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+        if let Some(block) = self.historical_rpc_block {
+            // Take the URL so upstream does not also install its Bedrock-derived middleware.
+            let endpoint = self.inner.historical_rpc.take().ok_or_else(|| {
+                eyre::eyre!("--rollup.historicalrpc.block requires --rollup.historicalrpc")
+            })?;
+            let client = HistoricalRpcClient::new(&endpoint)?;
+            let layer = HistoricalRpc::new(ctx.node.provider().clone(), client, block);
+            return self.inner.with_rpc_middleware(layer).launch_add_ons(ctx).await;
+        }
+        self.inner.launch_add_ons(ctx).await
+    }
+}
+
+impl<N: FullNodeComponents> RethRpcAddOns<N> for ConduitOpAddOns<N>
+where
+    OpEthApiBuilder: EthApiBuilder<N>,
+    StandardOpAddOns<N>: RethRpcAddOns<N>,
+    Self: NodeAddOns<N, Handle = <StandardOpAddOns<N> as NodeAddOns<N>>::Handle>,
+{
+    type EthApi = <StandardOpAddOns<N> as RethRpcAddOns<N>>::EthApi;
+
+    fn hooks_mut(&mut self) -> &mut RpcHooks<N, Self::EthApi> {
+        self.inner.hooks_mut()
+    }
+}
+
+impl<N: FullNodeComponents> EngineValidatorAddOn<N> for ConduitOpAddOns<N>
+where
+    OpEthApiBuilder: EthApiBuilder<N>,
+    StandardOpAddOns<N>: EngineValidatorAddOn<N>,
+{
+    type ValidatorBuilder = <StandardOpAddOns<N> as EngineValidatorAddOn<N>>::ValidatorBuilder;
+
+    fn engine_validator_builder(&self) -> Self::ValidatorBuilder {
+        self.inner.engine_validator_builder()
     }
 }
 

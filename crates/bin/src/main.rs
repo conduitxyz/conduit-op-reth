@@ -31,6 +31,11 @@ struct ConduitRollupArgs {
     /// Proxy the public Slipstream batch API to the configured sequencer.
     #[arg(long = "conduit.slipstream")]
     slipstream: bool,
+
+    /// Forward historical RPC requests below this block instead of Bedrock.
+    /// The cutoff block itself is served locally; does not change the chain's hardforks.
+    #[arg(long = "rollup.historicalrpc.block", value_name = "BLOCK", requires = "historical_rpc")]
+    historical_rpc_block: Option<u64>,
 }
 
 #[global_allocator]
@@ -61,7 +66,8 @@ fn main() {
         |builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
          args: ConduitRollupArgs| async move {
             info!(target: "reth::cli", "Launching conduit-op-reth node");
-            launcher::launch_node(builder, args.rollup, args.slipstream).await
+            launcher::launch_node(builder, args.rollup, args.slipstream, args.historical_rpc_block)
+                .await
         },
     ) {
         eprintln!("Error: {err:?}");
@@ -79,6 +85,45 @@ mod tests {
         DefaultRpcModuleValidator,
         ConduitSubCommand,
     >;
+
+    #[test]
+    fn historical_rpc_block_flag() {
+        let parse = |args: &[&str]| {
+            ConduitCli::try_parse_from(
+                ["conduit-op-reth", "node"].into_iter().chain(args.iter().copied()),
+            )
+        };
+        let reth_ethereum_cli::Commands::Node(default) = parse(&[]).unwrap().command else {
+            panic!("expected node command")
+        };
+        assert_eq!(default.ext.historical_rpc_block, None);
+        for endpoint_flag in ["--rollup.historicalrpc", "--rollup.historical-rpc"] {
+            let reth_ethereum_cli::Commands::Node(command) = parse(&[
+                endpoint_flag,
+                "http://localhost:8545",
+                "--rollup.historicalrpc.block",
+                "32956469",
+            ])
+            .unwrap()
+            .command
+            else {
+                panic!("expected node command")
+            };
+            assert_eq!(command.ext.historical_rpc_block, Some(32956469));
+        }
+        assert!(parse(&["--rollup.historicalrpc.block", "42"]).is_err());
+        for invalid in ["-1", "18446744073709551616", "not-a-block"] {
+            assert!(
+                parse(&[
+                    "--rollup.historicalrpc",
+                    "http://localhost:8545",
+                    "--rollup.historicalrpc.block",
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
+    }
 
     /// Upgrade tripwire for the CLI surface of the upstream `proofs` commands: operators'
     /// runbooks depend on these subcommands and flag names. If an op-reth version bump
