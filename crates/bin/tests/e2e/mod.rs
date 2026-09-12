@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 pub mod evm_limits_test;
 pub mod genesis_validation_test;
+pub mod historical_rpc_test;
 pub mod proofs_history_test;
 pub mod state_override_test;
 
