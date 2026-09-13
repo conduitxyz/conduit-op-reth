@@ -24,10 +24,11 @@ pub const PREFUND_BALANCE_U256: alloy_primitives::U256 =
 /// Each `advance_block()` increments by 1.
 const INITIAL_PAYLOAD_TIMESTAMP: u64 = 1710338135;
 
-/// Fork activation timestamp.
+/// Fork activation timestamp. The test chain has 1-second blocks, and the genesis built by
+/// [`build_genesis_with_override`] declares that (`blockTime: 1`):
 /// - Block 1: t=INITIAL+1 -> fork not active
-/// - Block 2: t=INITIAL+2 -> fork active, NOT active at t-2 -> applies override
-/// - Block 3: t=INITIAL+3 -> fork active AND active at t-2 -> no-op
+/// - Block 2: t=INITIAL+2 -> fork active, NOT active at t-1 -> applies override
+/// - Block 3: t=INITIAL+3 -> fork active AND active at t-1 -> no-op
 pub const FORK_ACTIVATION_TIMESTAMP: u64 = INITIAL_PAYLOAD_TIMESTAMP + 2;
 
 pub(crate) const BASE_GENESIS: &str =
@@ -83,6 +84,7 @@ pub fn build_genesis_with_override(
     genesis["config"]["conduit"] = serde_json::json!({
         "stateOverrideFork0": {
             "time": fork_time,
+            "blockTime": 1,
             "updates": updates
         }
     });

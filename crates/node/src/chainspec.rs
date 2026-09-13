@@ -31,11 +31,21 @@ pub struct StateOverrideAccount {
     pub storage: Option<std::collections::BTreeMap<B256, B256>>,
 }
 
+/// Block time assumed by the StateOverrideFork0 transition-block detection when the genesis
+/// does not configure one. Matches the OP Stack default (and the Canyon create2 deployer
+/// heuristic in `alloy_op_evm`).
+pub const DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME: u64 = 2;
+
 /// Configuration for the StateOverrideFork0 hardfork.
 #[derive(Debug, Clone)]
 pub struct StateOverrideFork0Config {
     /// Account state updates to apply at activation, keyed by address.
     pub updates: HashMap<Address, StateOverrideAccount>,
+    /// The chain's block time in seconds, used to recognise the activation block: the
+    /// overrides are applied to the first block whose timestamp is at or after the fork
+    /// timestamp, i.e. when the fork is active at `timestamp` but not at
+    /// `timestamp - block_time`.
+    pub block_time: u64,
 }
 
 /// EVM limits to apply when EvmLimitsFork0 activates.
@@ -182,9 +192,13 @@ struct ConduitOpGenesisConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StateOverrideFork0Raw {
     time: u64,
     updates: HashMap<Address, StateOverrideAccount>,
+    /// Chain block time in seconds; defaults to
+    /// [`DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME`] when omitted.
+    block_time: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,7 +299,12 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             .unwrap_or(ForkCondition::Never);
 
         let state_override_fork0 = raw_fork0.map(|raw| {
-            let config = StateOverrideFork0Config { updates: raw.updates };
+            let block_time =
+                raw.block_time.unwrap_or(DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME);
+            if block_time == 0 {
+                return Err(eyre::eyre!("StateOverrideFork0 blockTime must be greater than zero"));
+            }
+            let config = StateOverrideFork0Config { updates: raw.updates, block_time };
 
             if exclude_state_override_from_fork_id(&op_chain_spec) {
                 eprintln!(
@@ -300,8 +319,8 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
                 );
             }
 
-            config
-        });
+            Ok(config)
+        }).transpose()?;
 
         let evm_limits_fork0 = if let Some(raw) = raw_evm_limits_fork0 {
             match op_chain_spec.op_fork_activation(OpHardfork::Karst) {
@@ -524,6 +543,25 @@ mod tests {
         let slot_val: alloy_primitives::B256 =
             "0x00000000000000000000000000000000000000000000000000000000000000ff".parse().unwrap();
         assert_eq!(storage[&slot_key], slot_val);
+    }
+
+    #[test]
+    fn state_override_fork_block_time_defaults_and_validates() {
+        let spec = parse_spec(&with_conduit_fork(5000));
+        assert_eq!(
+            spec.state_override_fork0.as_ref().unwrap().block_time,
+            DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME
+        );
+
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_fork(5000)).unwrap();
+        genesis["config"]["conduit"]["stateOverrideFork0"]["blockTime"] = serde_json::json!(1);
+        let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+        assert_eq!(spec.state_override_fork0.as_ref().unwrap().block_time, 1);
+
+        genesis["config"]["conduit"]["stateOverrideFork0"]["blockTime"] = serde_json::json!(0);
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("blockTime must be greater than zero"));
     }
 
     #[test]

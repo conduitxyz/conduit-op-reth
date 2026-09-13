@@ -25,8 +25,13 @@ use tracing::info;
 /// storage overrides with a `code` field, or target an address that already has a non-empty
 /// account (balance, nonce, or code).
 ///
-/// Uses the OP Stack 2-second block time heuristic (matching Canyon's `ensure_create2_deployer`)
-/// to detect the transition block without requiring the parent block's timestamp.
+/// The transition block is detected the same way as Canyon's `ensure_create2_deployer`: the
+/// fork is active at the block timestamp but not at `timestamp - block_time`, where
+/// `block_time` comes from the chain configuration (`StateOverrideFork0Config::block_time`)
+/// rather than being hardcoded to 2 seconds. The block executor has no access to the parent
+/// header, so the block time has to be known up front: with a window that is too wide, chains
+/// with shorter blocks re-apply the overrides on the following block(s); with a window that is
+/// too narrow, the activation block is missed.
 pub fn ensure_state_override_fork0<DB>(
     chain_spec: &impl ConduitOpHardforks,
     timestamp: u64,
@@ -37,10 +42,11 @@ where
     DB: Database + DatabaseCommit,
 {
     // If the fork is active at the current timestamp but was not active at the previous block
-    // timestamp (heuristically, OP Stack block time is 2s), then we are at the transition block.
-    // TODO(rezmah): review whether 2s heuristic is appropriate for all target chains
+    // timestamp, then we are at the transition block.
     if !chain_spec.is_state_override_fork0_active_at_timestamp(timestamp) ||
-        chain_spec.is_state_override_fork0_active_at_timestamp(timestamp.saturating_sub(2))
+        chain_spec.is_state_override_fork0_active_at_timestamp(
+            timestamp.saturating_sub(config.block_time),
+        )
     {
         return Ok(());
     }
@@ -62,12 +68,14 @@ where
             for (&key, &value) in storage {
                 let key = U256::from_be_bytes(key.0);
                 let value = U256::from_be_bytes(value.0);
-                // TODO(rezmah): review whether original_value=ZERO and transaction_id=0
-                // are correct for pre-execution storage overrides
-                revm_acc.storage.insert(
-                    key,
-                    EvmStorageSlot::new_changed(U256::ZERO, value, TransactionId::ZERO),
-                );
+                // The slot's current value must be recorded as the original: `State::commit`
+                // drops slots whose original and present values are equal, and uses the
+                // original as the pre-state in the bundle reverts (and hence in the
+                // storage changesets written to the database).
+                let original = db.storage(address, key)?;
+                revm_acc
+                    .storage
+                    .insert(key, EvmStorageSlot::new_changed(original, value, TransactionId::ZERO));
             }
         }
 
@@ -80,7 +88,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{chainspec::StateOverrideAccount, hardforks::ConduitOpHardfork};
+    use crate::{
+        chainspec::{DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME, StateOverrideAccount},
+        hardforks::ConduitOpHardfork,
+    };
     use alloy_primitives::{Address, B256, Bytes};
     use reth_chainspec::{EthereumHardfork, EthereumHardforks, ForkCondition};
     use reth_optimism_forks::{OpHardfork, OpHardforks};
@@ -124,7 +135,7 @@ mod tests {
                 storage: None,
             },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { updates, block_time: DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME }
     }
 
     fn storage_only_config() -> StateOverrideFork0Config {
@@ -135,7 +146,7 @@ mod tests {
             Address::with_last_byte(0x99),
             StateOverrideAccount { code: None, storage: Some(storage) },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { updates, block_time: DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME }
     }
 
     fn mixed_config() -> StateOverrideFork0Config {
@@ -149,7 +160,7 @@ mod tests {
                 storage: Some(storage),
             },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideFork0Config { updates, block_time: DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME }
     }
 
     /// Core happy-path: bytecode injected at exact transition timestamp.
@@ -288,6 +299,65 @@ mod tests {
         );
     }
 
+    /// Overriding a slot that currently holds a non-zero value must both apply the new value
+    /// (including zero) and record the pre-override value in the bundle reverts, which is
+    /// what the storage changesets and historical state lookups are built from.
+    #[test]
+    fn storage_override_records_previous_value_and_can_clear_slots() {
+        use revm::{
+            Database as _,
+            database::{State, states::bundle_state::BundleRetention},
+        };
+
+        let spec = MockSpec { fork_time: Some(1000) };
+        let addr = Address::with_last_byte(0x42);
+        let cleared_slot = U256::from(0x01);
+        let changed_slot = U256::from(0x02);
+
+        let mut storage = BTreeMap::new();
+        storage.insert(B256::with_last_byte(0x01), B256::ZERO);
+        storage.insert(B256::with_last_byte(0x02), B256::with_last_byte(0x99));
+        let mut updates = HashMap::default();
+        updates.insert(
+            addr,
+            StateOverrideAccount {
+                code: Some(Bytes::from_static(&[0x60, 0x80])),
+                storage: Some(storage),
+            },
+        );
+        let config = StateOverrideFork0Config {
+            updates,
+            block_time: DEFAULT_STATE_OVERRIDE_FORK0_BLOCK_TIME,
+        };
+
+        let mut inner = InMemoryDB::default();
+        inner.insert_account_info(addr, AccountInfo { nonce: 1, ..Default::default() });
+        inner.insert_account_storage(addr, cleared_slot, U256::from(0x55)).unwrap();
+        inner.insert_account_storage(addr, changed_slot, U256::from(0x77)).unwrap();
+        let mut db = State::builder().with_database(inner).with_bundle_update().build();
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        db.merge_transitions(BundleRetention::Reverts);
+
+        assert_eq!(db.storage(addr, cleared_slot).unwrap(), U256::ZERO, "slot not cleared");
+        assert_eq!(db.storage(addr, changed_slot).unwrap(), U256::from(0x99));
+
+        let bundle = db.take_bundle();
+        let account = bundle.state.get(&addr).expect("account in bundle");
+        assert_eq!(account.storage[&cleared_slot].previous_or_original_value, U256::from(0x55));
+        assert_eq!(account.storage[&changed_slot].previous_or_original_value, U256::from(0x77));
+
+        let revert = bundle
+            .reverts
+            .iter()
+            .flat_map(|block| block.iter())
+            .find(|(address, _)| *address == addr)
+            .map(|(_, revert)| revert)
+            .expect("revert entry for overridden account");
+        assert_eq!(revert.storage[&cleared_slot].to_previous_value(), U256::from(0x55));
+        assert_eq!(revert.storage[&changed_slot].to_previous_value(), U256::from(0x77));
+    }
+
     /// Override applied at transition, then code changed externally — a later block
     /// must not revert it. Differs from `no_op_after_transition` which verifies the
     /// guard on a clean DB; this verifies post-transition state isn't clobbered.
@@ -318,6 +388,59 @@ mod tests {
             new_code,
             "override should not be re-applied after transition"
         );
+    }
+
+    /// On a chain with 1-second blocks the block after the transition block must not re-apply
+    /// the overrides (with the default 2-second window it would, clobbering any change a
+    /// transaction in the transition block made to the overridden slots).
+    #[test]
+    fn one_second_block_time_applies_exactly_once() {
+        let spec = MockSpec { fork_time: Some(1000) };
+        let mut config = mixed_config();
+        config.block_time = 1;
+        let addr = Address::with_last_byte(0x42);
+        let mut db = InMemoryDB::default();
+
+        ensure_state_override_fork0(&spec, 999, &config, &mut db).unwrap();
+        assert!(db.basic_ref(addr).unwrap().is_none());
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        assert_eq!(db.storage_ref(addr, U256::from(0x01)).unwrap(), U256::from(0xaa));
+
+        // A transaction in block 1000 changes the overridden slot; block 1001 must keep it.
+        db.insert_account_storage(addr, U256::from(0x01), U256::from(0xbb)).unwrap();
+        ensure_state_override_fork0(&spec, 1001, &config, &mut db).unwrap();
+        assert_eq!(db.storage_ref(addr, U256::from(0x01)).unwrap(), U256::from(0xbb));
+    }
+
+    /// On a chain with blocks longer than 2 seconds the first post-fork block is not necessarily
+    /// within 2 seconds of the fork timestamp; the configured block time widens the window.
+    #[test]
+    fn longer_block_time_does_not_miss_the_activation_block() {
+        let spec = MockSpec { fork_time: Some(1000) };
+        let mut config = bytecode_config();
+        config.block_time = 5;
+        let addr = Address::with_last_byte(0x42);
+        let mut db = InMemoryDB::default();
+
+        // Blocks at 995, 1000 + 4 (first block at or after the fork), 1009.
+        ensure_state_override_fork0(&spec, 995, &config, &mut db).unwrap();
+        assert!(db.basic_ref(addr).unwrap().is_none());
+
+        ensure_state_override_fork0(&spec, 1004, &config, &mut db).unwrap();
+        assert!(db.basic_ref(addr).unwrap().is_some(), "activation block missed");
+
+        let new_code = Bytes::from_static(&[0x01, 0x02]);
+        db.insert_account_info(
+            addr,
+            AccountInfo {
+                code_hash: alloy_primitives::keccak256(new_code.as_ref()),
+                code: Some(Bytecode::new_raw(new_code.clone())),
+                ..Default::default()
+            },
+        );
+        ensure_state_override_fork0(&spec, 1009, &config, &mut db).unwrap();
+        assert_eq!(db.basic_ref(addr).unwrap().unwrap().code.unwrap().original_bytes(), new_code);
     }
 
     /// Fork time = None → no-op regardless of timestamp.
