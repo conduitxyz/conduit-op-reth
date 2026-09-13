@@ -62,12 +62,14 @@ where
             for (&key, &value) in storage {
                 let key = U256::from_be_bytes(key.0);
                 let value = U256::from_be_bytes(value.0);
-                // TODO(rezmah): review whether original_value=ZERO and transaction_id=0
-                // are correct for pre-execution storage overrides
-                revm_acc.storage.insert(
-                    key,
-                    EvmStorageSlot::new_changed(U256::ZERO, value, TransactionId::ZERO),
-                );
+                // The slot's current value must be recorded as the original: `State::commit`
+                // drops slots whose original and present values are equal, and uses the
+                // original as the pre-state in the bundle reverts (and hence in the
+                // storage changesets written to the database).
+                let original = db.storage(address, key)?;
+                revm_acc
+                    .storage
+                    .insert(key, EvmStorageSlot::new_changed(original, value, TransactionId::ZERO));
             }
         }
 
@@ -286,6 +288,62 @@ mod tests {
             U256::from(0xff),
             "storage-only override should persist on non-empty account"
         );
+    }
+
+    /// Overriding a slot that currently holds a non-zero value must both apply the new value
+    /// (including zero) and record the pre-override value in the bundle reverts, which is
+    /// what the storage changesets and historical state lookups are built from.
+    #[test]
+    fn storage_override_records_previous_value_and_can_clear_slots() {
+        use revm::{
+            Database as _,
+            database::{State, states::bundle_state::BundleRetention},
+        };
+
+        let spec = MockSpec { fork_time: Some(1000) };
+        let addr = Address::with_last_byte(0x42);
+        let cleared_slot = U256::from(0x01);
+        let changed_slot = U256::from(0x02);
+
+        let mut storage = BTreeMap::new();
+        storage.insert(B256::with_last_byte(0x01), B256::ZERO);
+        storage.insert(B256::with_last_byte(0x02), B256::with_last_byte(0x99));
+        let mut updates = HashMap::default();
+        updates.insert(
+            addr,
+            StateOverrideAccount {
+                code: Some(Bytes::from_static(&[0x60, 0x80])),
+                storage: Some(storage),
+            },
+        );
+        let config = StateOverrideFork0Config { updates };
+
+        let mut inner = InMemoryDB::default();
+        inner.insert_account_info(addr, AccountInfo { nonce: 1, ..Default::default() });
+        inner.insert_account_storage(addr, cleared_slot, U256::from(0x55)).unwrap();
+        inner.insert_account_storage(addr, changed_slot, U256::from(0x77)).unwrap();
+        let mut db = State::builder().with_database(inner).with_bundle_update().build();
+
+        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        db.merge_transitions(BundleRetention::Reverts);
+
+        assert_eq!(db.storage(addr, cleared_slot).unwrap(), U256::ZERO, "slot not cleared");
+        assert_eq!(db.storage(addr, changed_slot).unwrap(), U256::from(0x99));
+
+        let bundle = db.take_bundle();
+        let account = bundle.state.get(&addr).expect("account in bundle");
+        assert_eq!(account.storage[&cleared_slot].previous_or_original_value, U256::from(0x55));
+        assert_eq!(account.storage[&changed_slot].previous_or_original_value, U256::from(0x77));
+
+        let revert = bundle
+            .reverts
+            .iter()
+            .flat_map(|block| block.iter())
+            .find(|(address, _)| *address == addr)
+            .map(|(_, revert)| revert)
+            .expect("revert entry for overridden account");
+        assert_eq!(revert.storage[&cleared_slot].to_previous_value(), U256::from(0x55));
+        assert_eq!(revert.storage[&changed_slot].to_previous_value(), U256::from(0x77));
     }
 
     /// Override applied at transition, then code changed externally — a later block
