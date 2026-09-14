@@ -80,8 +80,11 @@ where
             for (&key, &value) in storage {
                 let key = U256::from_be_bytes(key.0);
                 let value = U256::from_be_bytes(value.0);
-                // TODO(rezmah): review whether original_value=ZERO and transaction_id=0
-                // are correct for pre-execution storage overrides
+                // `transaction_id` only drives journal warm/cold tracking, which this
+                // pre-execution commit never reaches, so ZERO is correct here.
+                //
+                // KNOWN ISSUE: `original_value` of ZERO leaves known issues around historical
+                // queries and rewinds. Forward execution and the state root are unaffected.
                 revm_acc.storage.insert(
                     key,
                     EvmStorageSlot::new_changed(U256::ZERO, value, TransactionId::ZERO),

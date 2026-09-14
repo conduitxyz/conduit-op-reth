@@ -2,8 +2,7 @@
 //!
 //! The second round of account state overrides, for networks that need to rewrite state twice.
 //! Only the activation guard is fork-specific: the updates themselves are applied by
-//! [`apply_state_overrides`], shared with
-//! [`state_override_fork0`](crate::state_override_fork0).
+//! `apply_state_overrides`, shared with [`state_override_fork0`](crate::state_override_fork0).
 
 use crate::{
     chainspec::StateOverrideFork1Config, hardforks::ConduitOpHardforks,
