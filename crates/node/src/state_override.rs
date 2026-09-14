@@ -1,15 +1,20 @@
-//! StateOverrideFork0 hardfork state transition.
+//! State override hardfork state transitions.
 //!
-//! Applies account state overrides (bytecode and/or storage) at the fork activation
-//! block, following the same pattern as the Canyon create2 deployer injection in
+//! Applies account state overrides (bytecode and/or storage) at a fork's activation block,
+//! following the same pattern as the Canyon create2 deployer injection in
 //! `alloy_op_evm::block::canyon`.
+//!
+//! One implementation serves every round in
+//! [`STATE_OVERRIDE_FORKS`](crate::hardforks::STATE_OVERRIDE_FORKS): the rounds differ only in
+//! which activation condition they read and which updates they carry, both of which arrive as
+//! arguments.
 
 use crate::{
-    chainspec::{StateOverrideAccount, StateOverrideFork0Config},
-    hardforks::ConduitOpHardforks,
+    chainspec::StateOverrideForkConfig,
+    hardforks::{ConduitOpHardfork, ConduitOpHardforks},
 };
 use alloy_evm::Database;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::U256;
 use revm::{
     DatabaseCommit,
     bytecode::Bytecode,
@@ -18,7 +23,7 @@ use revm::{
 };
 use tracing::info;
 
-/// Applies state updates configured for `StateOverrideFork0` at the transition block.
+/// Applies the state updates configured for `fork` at its transition block.
 ///
 /// Each update entry can set `code` (bytecode) and/or `storage` slots on a target address.
 /// Existing account balance and nonce are preserved.
@@ -30,10 +35,11 @@ use tracing::info;
 ///
 /// Uses the OP Stack 2-second block time heuristic (matching Canyon's `ensure_create2_deployer`)
 /// to detect the transition block without requiring the parent block's timestamp.
-pub fn ensure_state_override_fork0<DB>(
+pub fn ensure_state_override<DB>(
     chain_spec: &impl ConduitOpHardforks,
+    fork: ConduitOpHardfork,
     timestamp: u64,
-    config: &StateOverrideFork0Config,
+    config: &StateOverrideForkConfig,
     db: &mut DB,
 ) -> Result<(), DB::Error>
 where
@@ -42,30 +48,15 @@ where
     // If the fork is active at the current timestamp but was not active at the previous block
     // timestamp (heuristically, OP Stack block time is 2s), then we are at the transition block.
     // TODO(rezmah): review whether 2s heuristic is appropriate for all target chains
-    if !chain_spec.is_state_override_fork0_active_at_timestamp(timestamp) ||
-        chain_spec.is_state_override_fork0_active_at_timestamp(timestamp.saturating_sub(2))
+    if !chain_spec.is_conduit_op_fork_active_at_timestamp(fork, timestamp) ||
+        chain_spec.is_conduit_op_fork_active_at_timestamp(fork, timestamp.saturating_sub(2))
     {
         return Ok(());
     }
 
-    info!("Executing state override fork0 at {}", timestamp);
+    info!("Executing {fork} state override at {timestamp}");
 
-    apply_state_overrides(&config.updates, db)
-}
-
-/// Writes the configured account updates into `db`.
-///
-/// Shared by every state override hardfork; the caller is responsible for deciding that its fork
-/// is at its transition block. See [`ensure_state_override_fork0`] for the semantics of an update
-/// entry.
-pub(crate) fn apply_state_overrides<DB>(
-    updates: &std::collections::HashMap<Address, StateOverrideAccount>,
-    db: &mut DB,
-) -> Result<(), DB::Error>
-where
-    DB: Database + DatabaseCommit,
-{
-    for (&address, account) in updates {
+    for (&address, account) in &config.updates {
         let mut acc_info = db.basic(address)?.unwrap_or_default();
 
         if let Some(ref code) = account.code {
@@ -101,15 +92,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hardforks::ConduitOpHardfork;
-    use alloy_primitives::{B256, Bytes};
+    use crate::{chainspec::StateOverrideAccount, hardforks::STATE_OVERRIDE_FORKS};
+    use alloy_primitives::{Address, B256, Bytes};
     use reth_chainspec::{EthereumHardfork, EthereumHardforks, ForkCondition};
     use reth_optimism_forks::{OpHardfork, OpHardforks};
     use revm::{database::InMemoryDB, database_interface::DatabaseRef, state::AccountInfo};
     use std::collections::BTreeMap;
 
+    const FORK0: ConduitOpHardfork = ConduitOpHardfork::StateOverrideFork0;
+
+    /// Activation time per entry of [`STATE_OVERRIDE_FORKS`]; `None` means unconfigured.
     struct MockSpec {
-        fork_time: Option<u64>,
+        fork_times: [Option<u64>; STATE_OVERRIDE_FORKS.len()],
+    }
+
+    impl MockSpec {
+        /// Only the first round is scheduled, at `time`.
+        fn fork0_at(time: u64) -> Self {
+            let mut fork_times = [None; STATE_OVERRIDE_FORKS.len()];
+            fork_times[0] = Some(time);
+            Self { fork_times }
+        }
+
+        /// No round is scheduled.
+        fn unconfigured() -> Self {
+            Self { fork_times: [None; STATE_OVERRIDE_FORKS.len()] }
+        }
+
+        /// Schedules the leading rounds at the given times, in order.
+        fn rounds_at(times: &[u64]) -> Self {
+            let mut fork_times = [None; STATE_OVERRIDE_FORKS.len()];
+            for (slot, time) in fork_times.iter_mut().zip(times) {
+                *slot = Some(*time);
+            }
+            Self { fork_times }
+        }
     }
 
     impl EthereumHardforks for MockSpec {
@@ -126,31 +143,36 @@ mod tests {
 
     impl ConduitOpHardforks for MockSpec {
         fn conduit_op_fork_activation(&self, fork: ConduitOpHardfork) -> ForkCondition {
-            match fork {
-                ConduitOpHardfork::StateOverrideFork0 => match self.fork_time {
-                    Some(t) => ForkCondition::Timestamp(t),
-                    None => ForkCondition::Never,
-                },
-                ConduitOpHardfork::StateOverrideFork1 | ConduitOpHardfork::EvmLimitsFork0 => {
-                    ForkCondition::Never
-                }
+            match fork.state_override_index().and_then(|idx| self.fork_times[idx]) {
+                Some(time) => ForkCondition::Timestamp(time),
+                None => ForkCondition::Never,
             }
         }
     }
 
-    fn bytecode_config() -> StateOverrideFork0Config {
+    fn config_with(code: Option<&'static [u8]>, slot_value: Option<u8>) -> StateOverrideForkConfig {
+        let storage = slot_value.map(|value| {
+            let mut storage = BTreeMap::new();
+            storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(value));
+            storage
+        });
         let mut updates = HashMap::default();
         updates.insert(
             Address::with_last_byte(0x42),
-            StateOverrideAccount {
-                code: Some(Bytes::from_static(&[0x60, 0x80, 0x60, 0x40, 0x52])),
-                storage: None,
-            },
+            StateOverrideAccount { code: code.map(Bytes::from_static), storage },
         );
-        StateOverrideFork0Config { updates }
+        StateOverrideForkConfig { updates }
     }
 
-    fn storage_only_config() -> StateOverrideFork0Config {
+    fn bytecode_config() -> StateOverrideForkConfig {
+        config_with(Some(&[0x60, 0x80, 0x60, 0x40, 0x52]), None)
+    }
+
+    fn mixed_config() -> StateOverrideForkConfig {
+        config_with(Some(&[0x60, 0x80]), Some(0xaa))
+    }
+
+    fn storage_only_config() -> StateOverrideForkConfig {
         let mut storage = BTreeMap::new();
         storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xff));
         let mut updates = HashMap::default();
@@ -158,31 +180,17 @@ mod tests {
             Address::with_last_byte(0x99),
             StateOverrideAccount { code: None, storage: Some(storage) },
         );
-        StateOverrideFork0Config { updates }
-    }
-
-    fn mixed_config() -> StateOverrideFork0Config {
-        let mut storage = BTreeMap::new();
-        storage.insert(B256::with_last_byte(0x01), B256::with_last_byte(0xaa));
-        let mut updates = HashMap::default();
-        updates.insert(
-            Address::with_last_byte(0x42),
-            StateOverrideAccount {
-                code: Some(Bytes::from_static(&[0x60, 0x80])),
-                storage: Some(storage),
-            },
-        );
-        StateOverrideFork0Config { updates }
+        StateOverrideForkConfig { updates }
     }
 
     /// Core happy-path: bytecode injected at exact transition timestamp.
     #[test]
     fn injects_bytecode_at_transition_block() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec::fork0_at(1000);
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1000, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x42);
         let info = db.basic_ref(addr).unwrap().expect("account should exist");
@@ -194,11 +202,11 @@ mod tests {
     /// Mixed config: both code and storage slots applied in a single override entry.
     #[test]
     fn applies_bytecode_and_storage_together() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec::fork0_at(1000);
         let config = mixed_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1000, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x42);
         let info = db.basic_ref(addr).unwrap().expect("account should exist");
@@ -212,11 +220,11 @@ mod tests {
     /// Timestamp before fork activation → no state changes.
     #[test]
     fn no_op_before_activation() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec::fork0_at(1000);
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 998, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 998, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply before fork activates");
@@ -227,11 +235,11 @@ mod tests {
     /// isn't clobbered; this test verifies no state is touched at all.
     #[test]
     fn no_op_after_transition() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec::fork0_at(1000);
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1002, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1002, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply after transition block");
@@ -239,7 +247,7 @@ mod tests {
 
     #[test]
     fn preserves_existing_balance_and_nonce() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec::fork0_at(1000);
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
@@ -252,7 +260,7 @@ mod tests {
             },
         );
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1000, &config, &mut db).unwrap();
 
         let info =
             db.basic_ref(Address::with_last_byte(0x42)).unwrap().expect("account should exist");
@@ -267,12 +275,12 @@ mod tests {
     fn storage_only_on_empty_account_is_discarded_by_eip161() {
         use revm::{Database as _, database::State};
 
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec::fork0_at(1000);
         let config = storage_only_config();
         let inner = InMemoryDB::default();
         let mut db = State::builder().with_database(inner).with_bundle_update().build();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1000, &config, &mut db).unwrap();
 
         db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
 
@@ -289,7 +297,7 @@ mod tests {
     fn storage_only_on_non_empty_account_persists() {
         use revm::{Database as _, database::State};
 
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec::fork0_at(1000);
         let config = storage_only_config();
         let mut inner = InMemoryDB::default();
         inner.insert_account_info(
@@ -298,7 +306,7 @@ mod tests {
         );
         let mut db = State::builder().with_database(inner).with_bundle_update().build();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1000, &config, &mut db).unwrap();
 
         db.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
 
@@ -316,11 +324,11 @@ mod tests {
     /// guard on a clean DB; this verifies post-transition state isn't clobbered.
     #[test]
     fn does_not_reapply_after_transition() {
-        let spec = MockSpec { fork_time: Some(1000) };
+        let spec = MockSpec::fork0_at(1000);
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1000, &config, &mut db).unwrap();
 
         let addr = Address::with_last_byte(0x42);
         let new_code = Bytes::from_static(&[0x01, 0x02]);
@@ -333,7 +341,7 @@ mod tests {
             },
         );
 
-        ensure_state_override_fork0(&spec, 1002, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1002, &config, &mut db).unwrap();
 
         let info = db.basic_ref(addr).unwrap().expect("account should exist");
         assert_eq!(
@@ -346,13 +354,57 @@ mod tests {
     /// Fork time = None → no-op regardless of timestamp.
     #[test]
     fn no_op_when_fork_not_configured() {
-        let spec = MockSpec { fork_time: None };
+        let spec = MockSpec::unconfigured();
         let config = bytecode_config();
         let mut db = InMemoryDB::default();
 
-        ensure_state_override_fork0(&spec, 1000, &config, &mut db).unwrap();
+        ensure_state_override(&spec, FORK0, 1000, &config, &mut db).unwrap();
 
         let info = db.basic_ref(Address::with_last_byte(0x42)).unwrap();
         assert!(info.is_none(), "should not apply when fork is not configured");
+    }
+
+    /// Every round reads its own activation: walking all six rounds scheduled 1000s apart, each
+    /// one and only one fires at its own transition block, and the last write wins.
+    #[test]
+    fn each_round_applies_only_at_its_own_transition() {
+        let times: Vec<u64> =
+            (0..STATE_OVERRIDE_FORKS.len()).map(|i| 1000 + i as u64 * 1000).collect();
+        let spec = MockSpec::rounds_at(&times);
+        // Each round writes a distinguishable byte into the same slot on the same address.
+        let configs: Vec<_> = (0..STATE_OVERRIDE_FORKS.len())
+            .map(|i| config_with(Some(&[0xfe]), Some(i as u8)))
+            .collect();
+        let addr = Address::with_last_byte(0x42);
+        let mut db = InMemoryDB::default();
+
+        for (round, expected_time) in times.iter().enumerate() {
+            // Replaying every round at this timestamp: only `round` is at its transition.
+            for (fork, config) in STATE_OVERRIDE_FORKS.into_iter().zip(&configs) {
+                ensure_state_override(&spec, fork, *expected_time, config, &mut db).unwrap();
+            }
+            assert_eq!(
+                db.storage_ref(addr, U256::from(0x01)).unwrap(),
+                U256::from(round as u8),
+                "round {round} should own the slot at timestamp {expected_time}",
+            );
+        }
+    }
+
+    /// Rounds landing in the same transition window apply in fork order, so the later round
+    /// wins. Guards the ordering of the loop in
+    /// [`ConduitOpBlockExecutor`](crate::evm::ConduitOpBlockExecutor).
+    #[test]
+    fn later_round_wins_when_transition_windows_overlap() {
+        let spec = MockSpec::rounds_at(&[1000, 1001]);
+        let (first, second) = (config_with(Some(&[0x60]), None), config_with(Some(&[0xfe]), None));
+        let addr = Address::with_last_byte(0x42);
+        let mut db = InMemoryDB::default();
+
+        ensure_state_override(&spec, STATE_OVERRIDE_FORKS[0], 1001, &first, &mut db).unwrap();
+        ensure_state_override(&spec, STATE_OVERRIDE_FORKS[1], 1001, &second, &mut db).unwrap();
+
+        let info = db.basic_ref(addr).unwrap().expect("account should exist");
+        assert_eq!(info.code.unwrap().original_bytes(), Bytes::from_static(&[0xfe]));
     }
 }
