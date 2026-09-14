@@ -6,6 +6,8 @@ hardfork!(
     ConduitOpHardfork {
         /// Applies account state overrides (bytecode, storage) upon activation.
         StateOverrideFork0,
+        /// Applies a second round of account state overrides upon activation.
+        StateOverrideFork1,
         /// Applies configured EVM limits while preserving the active OP hardfork semantics.
         EvmLimitsFork0,
     }
@@ -22,6 +24,12 @@ pub trait ConduitOpHardforks: OpHardforks {
     /// Checks if StateOverrideFork0 is active at the given timestamp.
     fn is_state_override_fork0_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0)
+            .active_at_timestamp(timestamp)
+    }
+
+    /// Checks if StateOverrideFork1 is active at the given timestamp.
+    fn is_state_override_fork1_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork1)
             .active_at_timestamp(timestamp)
     }
 

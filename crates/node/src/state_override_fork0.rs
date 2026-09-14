@@ -4,9 +4,12 @@
 //! block, following the same pattern as the Canyon create2 deployer injection in
 //! `alloy_op_evm::block::canyon`.
 
-use crate::{chainspec::StateOverrideFork0Config, hardforks::ConduitOpHardforks};
+use crate::{
+    chainspec::{StateOverrideAccount, StateOverrideFork0Config},
+    hardforks::ConduitOpHardforks,
+};
 use alloy_evm::Database;
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use revm::{
     DatabaseCommit,
     bytecode::Bytecode,
@@ -47,7 +50,22 @@ where
 
     info!("Executing state override fork0 at {}", timestamp);
 
-    for (&address, account) in &config.updates {
+    apply_state_overrides(&config.updates, db)
+}
+
+/// Writes the configured account updates into `db`.
+///
+/// Shared by every state override hardfork; the caller is responsible for deciding that its fork
+/// is at its transition block. See [`ensure_state_override_fork0`] for the semantics of an update
+/// entry.
+pub(crate) fn apply_state_overrides<DB>(
+    updates: &std::collections::HashMap<Address, StateOverrideAccount>,
+    db: &mut DB,
+) -> Result<(), DB::Error>
+where
+    DB: Database + DatabaseCommit,
+{
+    for (&address, account) in updates {
         let mut acc_info = db.basic(address)?.unwrap_or_default();
 
         if let Some(ref code) = account.code {
@@ -80,8 +98,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{chainspec::StateOverrideAccount, hardforks::ConduitOpHardfork};
-    use alloy_primitives::{Address, B256, Bytes};
+    use crate::hardforks::ConduitOpHardfork;
+    use alloy_primitives::{B256, Bytes};
     use reth_chainspec::{EthereumHardfork, EthereumHardforks, ForkCondition};
     use reth_optimism_forks::{OpHardfork, OpHardforks};
     use revm::{database::InMemoryDB, database_interface::DatabaseRef, state::AccountInfo};
@@ -110,7 +128,9 @@ mod tests {
                     Some(t) => ForkCondition::Timestamp(t),
                     None => ForkCondition::Never,
                 },
-                ConduitOpHardfork::EvmLimitsFork0 => ForkCondition::Never,
+                ConduitOpHardfork::StateOverrideFork1 | ConduitOpHardfork::EvmLimitsFork0 => {
+                    ForkCondition::Never
+                }
             }
         }
     }

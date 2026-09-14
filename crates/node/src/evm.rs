@@ -6,6 +6,7 @@
 use crate::{
     chainspec::ConduitOpChainSpec, hardforks::ConduitOpHardforks,
     state_override_fork0::ensure_state_override_fork0,
+    state_override_fork1::ensure_state_override_fork1,
 };
 use alloy_consensus::Header;
 use alloy_evm::{
@@ -80,6 +81,18 @@ where
         // Apply state overrides at the StateOverrideFork0 transition block.
         if let Some(ref config) = self.chain_spec.state_override_fork0 {
             ensure_state_override_fork0(
+                self.chain_spec.as_ref(),
+                self.inner.evm.block().timestamp().saturating_to(),
+                config,
+                self.inner.evm.db_mut(),
+            )
+            .map_err(BlockExecutionError::other)?;
+        }
+
+        // Apply state overrides at the StateOverrideFork1 transition block. Fork1 runs after
+        // fork0 so that it wins if a chain ever schedules both within one transition window.
+        if let Some(ref config) = self.chain_spec.state_override_fork1 {
+            ensure_state_override_fork1(
                 self.chain_spec.as_ref(),
                 self.inner.evm.block().timestamp().saturating_to(),
                 config,
