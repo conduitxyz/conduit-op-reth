@@ -60,9 +60,9 @@ pub struct EvmLimitsFork0Config {
 ///
 /// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list by default so they
 /// participate in fork IDs, fork filters, and `forks_iter()`. Dedicated configuration fields carry
-/// the transition data consumed when each custom fork activates. StateOverrideFork0's activation
-/// condition is tracked separately because some legacy networks exclude it from their fork IDs for
-/// compatibility; every other custom fork is read straight from the inner hardfork list.
+/// the transition data consumed when each custom fork activates. The state override forks'
+/// activation conditions are tracked separately because some legacy networks exclude them from
+/// their fork IDs for compatibility.
 #[derive(Debug, Clone)]
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
@@ -73,6 +73,8 @@ pub struct ConduitOpChainSpec {
     state_override_fork0_activation: ForkCondition,
     /// Configuration for StateOverrideFork1 (None if not configured).
     pub state_override_fork1: Option<StateOverrideFork1Config>,
+    /// Activation condition for StateOverrideFork1, tracked independently from fork IDs.
+    state_override_fork1_activation: ForkCondition,
     /// EVM limits applied when EvmLimitsFork0 is active (None if not configured).
     pub evm_limits_fork0: Option<EvmLimitsFork0Config>,
 }
@@ -171,9 +173,8 @@ impl ConduitOpHardforks for ConduitOpChainSpec {
     fn conduit_op_fork_activation(&self, fork: ConduitOpHardfork) -> ForkCondition {
         match fork {
             ConduitOpHardfork::StateOverrideFork0 => self.state_override_fork0_activation,
-            ConduitOpHardfork::StateOverrideFork1 | ConduitOpHardfork::EvmLimitsFork0 => {
-                self.inner.fork(fork)
-            }
+            ConduitOpHardfork::StateOverrideFork1 => self.state_override_fork1_activation,
+            ConduitOpHardfork::EvmLimitsFork0 => self.inner.fork(fork),
         }
     }
 }
@@ -216,9 +217,9 @@ struct EvmLimitsFork0Raw {
 
 const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
 
-// These legacy networks have existing peers that do not include StateOverrideFork0 in their
-// EIP-2124 fork ID. The exclusion is specific to fork0's history and is not extended to
-// StateOverrideFork1.
+// These legacy networks have existing peers that do not include the state override forks in their
+// EIP-2124 fork ID. A network that already omits fork0 keeps omitting every later round, so its
+// peers stay compatible across the upgrade instead of splitting on a fork ID they never had.
 const STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS: &[u64] = &[901, 957];
 
 fn exclude_state_override_from_fork_id(op_chain_spec: &OpChainSpec) -> bool {
@@ -260,6 +261,7 @@ impl From<OpChainSpec> for ConduitOpChainSpec {
             state_override_fork0: None,
             state_override_fork0_activation: ForkCondition::Never,
             state_override_fork1: None,
+            state_override_fork1_activation: ForkCondition::Never,
             evm_limits_fork0: None,
         }
     }
@@ -335,17 +337,28 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             config
         });
 
-        // Unlike fork0, StateOverrideFork1 always participates in the fork ID. The legacy
-        // exclusion exists only for chains that had already passed fork0 with peers that never
-        // carried it; a newly scheduled round has no such history, so peers get the EIP-2124
-        // protection and stale nodes are rejected at activation instead of silently diverging.
-        let state_override_fork1 = raw_fork1.map(|raw| {
-            op_chain_spec
-                .inner
-                .hardforks
-                .insert(ConduitOpHardfork::StateOverrideFork1, ForkCondition::Timestamp(raw.time));
+        let state_override_fork1_activation = raw_fork1
+            .as_ref()
+            .map(|raw| ForkCondition::Timestamp(raw.time))
+            .unwrap_or(ForkCondition::Never);
 
-            StateOverrideFork1Config { updates: raw.updates }
+        let state_override_fork1 = raw_fork1.map(|raw| {
+            let config = StateOverrideFork1Config { updates: raw.updates };
+
+            if exclude_state_override_from_fork_id(&op_chain_spec) {
+                eprintln!(
+                    "Excluding StateOverrideFork1 from fork ID calculation for chain ID {} at timestamp {}",
+                    op_chain_spec.inner.genesis.config.chain_id,
+                    raw.time
+                );
+            } else {
+                op_chain_spec.inner.hardforks.insert(
+                    ConduitOpHardfork::StateOverrideFork1,
+                    ForkCondition::Timestamp(raw.time),
+                );
+            }
+
+            config
         });
 
         let evm_limits_fork0 = if let Some(raw) = raw_evm_limits_fork0 {
@@ -404,6 +417,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             state_override_fork0,
             state_override_fork0_activation,
             state_override_fork1,
+            state_override_fork1_activation,
             evm_limits_fork0,
         }))
     }
@@ -638,33 +652,39 @@ mod tests {
         assert_ne!(after_fork0.hash, after_fork1.hash);
     }
 
-    /// The legacy fork ID exclusion is specific to fork0's history: fork1 is new everywhere, so it
-    /// always contributes to the fork ID, even on the excluded chains.
+    /// A network that already omits fork0 from its fork ID keeps omitting the second round too,
+    /// so its existing peers stay compatible instead of splitting on a fork ID they never had.
     #[test]
-    fn excluded_chain_ids_still_include_fork1_in_fork_ids() {
+    fn excluded_chain_ids_keep_both_custom_forks_out_of_fork_ids() {
         for &chain_id in STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS {
             let mut genesis: serde_json::Value =
                 serde_json::from_str(&with_conduit_forks(5000, 6000)).unwrap();
             genesis["config"]["chainId"] = serde_json::json!(chain_id);
-            let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+            let json = serde_json::to_string(&genesis).unwrap();
+            let spec = parse_spec(&json);
+            let op_spec: OpChainSpec = {
+                let mut genesis: serde_json::Value = serde_json::from_str(&json).unwrap();
+                genesis["config"].as_object_mut().unwrap().remove("conduit");
+                let genesis: Genesis = serde_json::from_value(genesis).unwrap();
+                genesis.into()
+            };
 
             let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
-            assert!(
-                !names.contains(&"StateOverrideFork0"),
-                "fork0 should stay excluded for chain {chain_id}, got: {names:?}",
-            );
-            assert!(
-                names.contains(&"StateOverrideFork1"),
-                "fork1 should be in the fork ID for chain {chain_id}, got: {names:?}",
-            );
+            for fork in ["StateOverrideFork0", "StateOverrideFork1"] {
+                assert!(
+                    !names.contains(&fork),
+                    "{fork} should stay out of the fork ID for chain {chain_id}, got: {names:?}",
+                );
+            }
 
-            // Both rounds still activate.
+            // Both rounds still activate; only their contribution to the fork ID is suppressed.
             assert!(spec.is_state_override_fork0_active_at_timestamp(5000));
             assert!(spec.is_state_override_fork1_active_at_timestamp(6000));
 
-            // Only fork1 moves the fork ID on these chains.
-            assert_eq!(spec.fork_id(&head_at(5000)).next, 6000);
-            assert_ne!(spec.fork_id(&head_at(5000)).hash, spec.fork_id(&head_at(6000)).hash);
+            for ts in [0, 5000, 6000] {
+                assert_eq!(spec.fork_id(&head_at(ts)), op_spec.fork_id(&head_at(ts)));
+            }
+            assert_eq!(spec.latest_fork_id(), op_spec.latest_fork_id());
         }
     }
 
