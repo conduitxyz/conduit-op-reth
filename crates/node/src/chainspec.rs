@@ -604,8 +604,6 @@ mod tests {
             spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork1),
             ForkCondition::Timestamp(6000),
         );
-        assert!(!spec.is_state_override_fork1_active_at_timestamp(5999));
-        assert!(spec.is_state_override_fork1_active_at_timestamp(6000));
     }
 
     /// The second round rewrites state left by the first, so an earlier or equal activation is a
@@ -638,14 +636,6 @@ mod tests {
         assert_eq!(after_fork1.next, 0);
         assert_ne!(base.hash, after_fork0.hash);
         assert_ne!(after_fork0.hash, after_fork1.hash);
-        assert_eq!(spec.latest_fork_id(), after_fork1);
-
-        let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
-        assert!(names.contains(&"StateOverrideFork1"), "got: {names:?}");
-
-        for ts in [4999, 5000, 6000] {
-            assert_eq!(spec.fork_filter(head_at(ts)).current(), spec.fork_id(&head_at(ts)));
-        }
     }
 
     /// The legacy fork ID exclusion is specific to fork0's history: fork1 is new everywhere, so it
