@@ -36,6 +36,11 @@ pub struct StateOverrideAccount {
 pub struct StateOverrideForkConfig {
     /// Account state updates to apply at activation, keyed by address.
     pub updates: HashMap<Address, StateOverrideAccount>,
+    /// Block spacing around this round's activation, used to detect the transition block.
+    ///
+    /// Only has to match the block time in force when the round activates; a chain that changed
+    /// its block time elsewhere in its history is unaffected.
+    pub block_time_at_fork: u64,
 }
 
 /// EVM limits to apply when EvmLimitsFork0 activates.
@@ -228,8 +233,11 @@ impl ConduitOpGenesisConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StateOverrideForkRaw {
     time: u64,
+    /// Defaults to [`DEFAULT_BLOCK_TIME_AT_FORK`] so existing genesis files are unchanged.
+    block_time_at_fork: Option<u64>,
     updates: HashMap<Address, StateOverrideAccount>,
 }
 
@@ -241,6 +249,10 @@ struct EvmLimitsFork0Raw {
     max_initcode_size: Option<usize>,
     tx_gas_limit_cap: Option<u64>,
 }
+
+// OP Stack block time, and the transition-detection assumption every existing genesis was
+// written under. A round on a chain with different spacing sets `blockTimeAtFork` explicitly.
+const DEFAULT_BLOCK_TIME_AT_FORK: u64 = 2;
 
 const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
 
@@ -361,8 +373,16 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             }
             previous_round = Some((fork, raw.time));
 
+            // A zero block time would make the transition check compare the timestamp against
+            // itself, so the round could never fire.
+            let block_time_at_fork = raw.block_time_at_fork.unwrap_or(DEFAULT_BLOCK_TIME_AT_FORK);
+            if block_time_at_fork == 0 {
+                return Err(eyre::eyre!("{fork} blockTimeAtFork must be greater than zero"));
+            }
+
             state_override_fork_activations[idx] = ForkCondition::Timestamp(raw.time);
-            state_override_forks[idx] = Some(StateOverrideForkConfig { updates: raw.updates });
+            state_override_forks[idx] =
+                Some(StateOverrideForkConfig { updates: raw.updates, block_time_at_fork });
 
             let excluded = excludes_early_rounds && idx < STATE_OVERRIDE_FORK_ID_EXCLUDED_ROUNDS;
             if !excluded {
@@ -654,6 +674,55 @@ mod tests {
         assert_eq!(
             spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork1),
             ForkCondition::Timestamp(6000),
+        );
+    }
+
+    /// Existing genesis files omit `blockTimeAtFork`, so the default has to stay at the 2s
+    /// spacing they were written under — changing it would alter their transition block.
+    #[test]
+    fn block_time_at_fork_defaults_to_two() {
+        let spec = parse_spec(&with_conduit_forks(&[5000]));
+        let config = spec.state_override_fork(ConduitOpHardfork::StateOverrideFork0).unwrap();
+        assert_eq!(config.block_time_at_fork, DEFAULT_BLOCK_TIME_AT_FORK);
+        assert_eq!(config.block_time_at_fork, 2);
+    }
+
+    #[test]
+    fn block_time_at_fork_is_configurable_per_round() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks(&[5000, 6000])).unwrap();
+        genesis["config"]["conduit"]["stateOverrideFork0"]["blockTimeAtFork"] =
+            serde_json::json!(1);
+        let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+
+        // Set on the first round only; the second keeps the default.
+        assert_eq!(
+            spec.state_override_fork(ConduitOpHardfork::StateOverrideFork0)
+                .unwrap()
+                .block_time_at_fork,
+            1,
+        );
+        assert_eq!(
+            spec.state_override_fork(ConduitOpHardfork::StateOverrideFork1)
+                .unwrap()
+                .block_time_at_fork,
+            DEFAULT_BLOCK_TIME_AT_FORK,
+        );
+    }
+
+    /// Zero would compare the block's timestamp against itself, so the round could never fire.
+    #[test]
+    fn block_time_at_fork_rejects_zero() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks(&[5000])).unwrap();
+        genesis["config"]["conduit"]["stateOverrideFork0"]["blockTimeAtFork"] =
+            serde_json::json!(0);
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("StateOverrideFork0 blockTimeAtFork must be greater than zero"),
+            "unexpected error: {err}",
         );
     }
 
