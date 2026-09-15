@@ -21,7 +21,7 @@ fmt:
 
 clippy:
 	@echo "Running clippy..."
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 deny:
 	@echo "Running security audit..."
@@ -33,11 +33,11 @@ udeps:
 
 docs:
 	@echo "Checking documentation..."
-	RUSTDOCFLAGS="-D warnings" cargo doc --all --no-deps --document-private-items
+	RUSTDOCFLAGS="-D warnings" cargo doc --all --no-deps --document-private-items --all-features --locked
 
 test:
 	@echo "Running tests..."
-	cargo test --workspace
+	cargo test --workspace --all-features --locked
 
 dev: debug
 	rm -rf .devdata
