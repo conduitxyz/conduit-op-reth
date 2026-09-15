@@ -1,4 +1,4 @@
-use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks};
+use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks, STATE_OVERRIDE_FORKS};
 use alloy_consensus::Header;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, Bytes};
@@ -31,11 +31,16 @@ pub struct StateOverrideAccount {
     pub storage: Option<std::collections::BTreeMap<B256, B256>>,
 }
 
-/// Configuration for the StateOverrideFork0 hardfork.
+/// Configuration for one state override hardfork.
 #[derive(Debug, Clone)]
-pub struct StateOverrideFork0Config {
+pub struct StateOverrideForkConfig {
     /// Account state updates to apply at activation, keyed by address.
     pub updates: HashMap<Address, StateOverrideAccount>,
+    /// Block spacing around this round's activation, used to detect the transition block.
+    ///
+    /// Only has to match the block time in force when the round activates; a chain that changed
+    /// its block time elsewhere in its history is unaffected.
+    pub block_time_at_fork: u64,
 }
 
 /// EVM limits to apply when EvmLimitsFork0 activates.
@@ -53,19 +58,38 @@ pub struct EvmLimitsFork0Config {
 ///
 /// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list by default so they
 /// participate in fork IDs, fork filters, and `forks_iter()`. Dedicated configuration fields carry
-/// the transition data consumed when each custom fork activates. StateOverrideFork0's activation
-/// condition is tracked separately because some legacy networks exclude it from their fork IDs for
-/// compatibility.
+/// the transition data consumed when each custom fork activates. The state override rounds'
+/// activation conditions are tracked separately because some legacy networks exclude the earliest
+/// of them from their fork IDs for compatibility.
 #[derive(Debug, Clone)]
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
     pub inner: OpChainSpec,
-    /// Configuration for StateOverrideFork0 (None if not configured).
-    pub state_override_fork0: Option<StateOverrideFork0Config>,
-    /// Activation condition for StateOverrideFork0, tracked independently from fork IDs.
-    state_override_fork0_activation: ForkCondition,
+    /// Configuration per state override round, indexed as in [`STATE_OVERRIDE_FORKS`]
+    /// (`None` where that round is not configured).
+    state_override_forks: [Option<StateOverrideForkConfig>; STATE_OVERRIDE_FORKS.len()],
+    /// Activation condition per state override round, tracked independently from fork IDs.
+    state_override_fork_activations: [ForkCondition; STATE_OVERRIDE_FORKS.len()],
     /// EVM limits applied when EvmLimitsFork0 is active (None if not configured).
     pub evm_limits_fork0: Option<EvmLimitsFork0Config>,
+}
+
+impl ConduitOpChainSpec {
+    /// Returns the configuration for `fork`, or `None` if it is not a state override fork or is
+    /// not configured for this chain.
+    pub fn state_override_fork(&self, fork: ConduitOpHardfork) -> Option<&StateOverrideForkConfig> {
+        fork.state_override_index().and_then(|idx| self.state_override_forks[idx].as_ref())
+    }
+
+    /// Returns every configured state override round with its configuration, in activation order.
+    pub fn state_override_forks(
+        &self,
+    ) -> impl Iterator<Item = (ConduitOpHardfork, &StateOverrideForkConfig)> {
+        STATE_OVERRIDE_FORKS
+            .into_iter()
+            .zip(&self.state_override_forks)
+            .filter_map(|(fork, config)| config.as_ref().map(|config| (fork, config)))
+    }
 }
 
 impl EthChainSpec for ConduitOpChainSpec {
@@ -160,9 +184,9 @@ impl OpHardforks for ConduitOpChainSpec {
 
 impl ConduitOpHardforks for ConduitOpChainSpec {
     fn conduit_op_fork_activation(&self, fork: ConduitOpHardfork) -> ForkCondition {
-        match fork {
-            ConduitOpHardfork::StateOverrideFork0 => self.state_override_fork0_activation,
-            ConduitOpHardfork::EvmLimitsFork0 => self.inner.fork(fork),
+        match fork.state_override_index() {
+            Some(idx) => self.state_override_fork_activations[idx],
+            None => self.inner.fork(fork),
         }
     }
 }
@@ -177,13 +201,43 @@ struct GenesisExtraFields {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConduitOpGenesisConfig {
-    state_override_fork0: Option<StateOverrideFork0Raw>,
+    state_override_fork0: Option<StateOverrideForkRaw>,
+    state_override_fork1: Option<StateOverrideForkRaw>,
+    state_override_fork2: Option<StateOverrideForkRaw>,
+    state_override_fork3: Option<StateOverrideForkRaw>,
+    state_override_fork4: Option<StateOverrideForkRaw>,
+    state_override_fork5: Option<StateOverrideForkRaw>,
+    state_override_fork6: Option<StateOverrideForkRaw>,
+    state_override_fork7: Option<StateOverrideForkRaw>,
+    state_override_fork8: Option<StateOverrideForkRaw>,
+    state_override_fork9: Option<StateOverrideForkRaw>,
     evm_limits_fork0: Option<EvmLimitsFork0Raw>,
 }
 
+impl ConduitOpGenesisConfig {
+    /// The raw state override sections in [`STATE_OVERRIDE_FORKS`] order.
+    fn state_override_forks(self) -> [Option<StateOverrideForkRaw>; STATE_OVERRIDE_FORKS.len()] {
+        [
+            self.state_override_fork0,
+            self.state_override_fork1,
+            self.state_override_fork2,
+            self.state_override_fork3,
+            self.state_override_fork4,
+            self.state_override_fork5,
+            self.state_override_fork6,
+            self.state_override_fork7,
+            self.state_override_fork8,
+            self.state_override_fork9,
+        ]
+    }
+}
+
 #[derive(Debug, Deserialize)]
-struct StateOverrideFork0Raw {
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StateOverrideForkRaw {
     time: u64,
+    /// Defaults to [`DEFAULT_BLOCK_TIME_AT_FORK`] so existing genesis files are unchanged.
+    block_time_at_fork: Option<u64>,
     updates: HashMap<Address, StateOverrideAccount>,
 }
 
@@ -196,11 +250,20 @@ struct EvmLimitsFork0Raw {
     tx_gas_limit_cap: Option<u64>,
 }
 
+// OP Stack block time, and the transition-detection assumption every existing genesis was
+// written under. A round on a chain with different spacing sets `blockTimeAtFork` explicitly.
+const DEFAULT_BLOCK_TIME_AT_FORK: u64 = 2;
+
 const LEGACY_CANYON_GENESIS_CHAIN_IDS: &[u64] = &[1740, 53302, 888888888, 31929];
 
-// These legacy networks have existing peers that do not include StateOverrideFork0 in their
-// EIP-2124 fork ID.
+// These legacy networks have existing peers that do not carry the earliest state override rounds
+// in their EIP-2124 fork ID, so introducing one there would split peering rather than protect it.
 const STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS: &[u64] = &[901, 957];
+
+// How many leading rounds the above networks omit. The exclusion covers only the rounds their
+// peers predate; by the time a later round is scheduled the peer set has upgraded, so those get
+// the usual fork ID protection on every chain.
+const STATE_OVERRIDE_FORK_ID_EXCLUDED_ROUNDS: usize = 2;
 
 fn exclude_state_override_from_fork_id(op_chain_spec: &OpChainSpec) -> bool {
     STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS.contains(&op_chain_spec.inner.genesis.config.chain_id)
@@ -238,8 +301,8 @@ impl From<OpChainSpec> for ConduitOpChainSpec {
     fn from(inner: OpChainSpec) -> Self {
         Self {
             inner,
-            state_override_fork0: None,
-            state_override_fork0_activation: ForkCondition::Never,
+            state_override_forks: [const { None }; STATE_OVERRIDE_FORKS.len()],
+            state_override_fork_activations: [ForkCondition::Never; STATE_OVERRIDE_FORKS.len()],
             evm_limits_fork0: None,
         }
     }
@@ -266,9 +329,9 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             .deserialize_as()
             .map_err(|e| eyre::eyre!("failed to deserialize conduit config: {e}"))?;
 
-        let conduit_config = extras.conduit.unwrap_or_default();
-        let raw_fork0 = conduit_config.state_override_fork0;
-        let raw_evm_limits_fork0 = conduit_config.evm_limits_fork0;
+        let mut conduit_config = extras.conduit.unwrap_or_default();
+        let raw_evm_limits_fork0 = conduit_config.evm_limits_fork0.take();
+        let raw_state_override_forks = conduit_config.state_override_forks();
 
         // Convert genesis to OpChainSpec (handles all OP hardfork parsing).
         let mut op_chain_spec: OpChainSpec = genesis.into();
@@ -279,29 +342,62 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             );
         }
 
-        let state_override_fork0_activation = raw_fork0
-            .as_ref()
-            .map(|raw| ForkCondition::Timestamp(raw.time))
-            .unwrap_or(ForkCondition::Never);
+        let chain_id = op_chain_spec.inner.genesis.config.chain_id;
+        let excludes_early_rounds = exclude_state_override_from_fork_id(&op_chain_spec);
+        let mut state_override_forks = [const { None }; STATE_OVERRIDE_FORKS.len()];
+        let mut state_override_fork_activations =
+            [ForkCondition::Never; STATE_OVERRIDE_FORKS.len()];
+        let mut previous_round: Option<(usize, ConduitOpHardfork, u64)> = None;
 
-        let state_override_fork0 = raw_fork0.map(|raw| {
-            let config = StateOverrideFork0Config { updates: raw.updates };
+        for (idx, raw) in raw_state_override_forks.into_iter().enumerate() {
+            let fork = STATE_OVERRIDE_FORKS[idx];
+            let Some(raw) = raw else { continue };
 
-            if exclude_state_override_from_fork_id(&op_chain_spec) {
-                eprintln!(
-                    "Excluding StateOverrideFork0 from fork ID calculation for chain ID {} at timestamp {}",
-                    op_chain_spec.inner.genesis.config.chain_id,
+            // Each round rewrites state left by the previous one, so the rounds must be
+            // configured contiguously from 0 and activate strictly in sequence. Checking against
+            // the immediately preceding index rather than "any earlier round" also rejects an
+            // interior gap, which would otherwise silently drop an intended prerequisite.
+            if idx != previous_round.map_or(0, |(previous_idx, _, _)| previous_idx + 1) {
+                // Unreachable for idx 0: with no previous round the expected index is 0.
+                return Err(eyre::eyre!(
+                    "{fork} requires {} to be configured",
+                    STATE_OVERRIDE_FORKS[idx - 1]
+                ));
+            }
+            if let Some((_, previous_fork, previous_time)) = previous_round &&
+                raw.time <= previous_time
+            {
+                return Err(eyre::eyre!(
+                    "{fork} timestamp {} must be after {previous_fork} timestamp {previous_time}",
                     raw.time
-                );
-            } else {
-                op_chain_spec.inner.hardforks.insert(
-                    ConduitOpHardfork::StateOverrideFork0,
-                    ForkCondition::Timestamp(raw.time),
-                );
+                ));
+            }
+            previous_round = Some((idx, fork, raw.time));
+
+            // A zero block time would make the transition check compare the timestamp against
+            // itself, so the round could never fire.
+            let block_time_at_fork = raw.block_time_at_fork.unwrap_or(DEFAULT_BLOCK_TIME_AT_FORK);
+            if block_time_at_fork == 0 {
+                return Err(eyre::eyre!("{fork} blockTimeAtFork must be greater than zero"));
             }
 
-            config
-        });
+            state_override_fork_activations[idx] = ForkCondition::Timestamp(raw.time);
+            state_override_forks[idx] =
+                Some(StateOverrideForkConfig { updates: raw.updates, block_time_at_fork });
+
+            let excluded = excludes_early_rounds && idx < STATE_OVERRIDE_FORK_ID_EXCLUDED_ROUNDS;
+            if !excluded {
+                op_chain_spec.inner.hardforks.insert(fork, ForkCondition::Timestamp(raw.time));
+            }
+
+            // Log every scheduled round: an excluded one is absent from the hardfork table reth
+            // prints at startup, so this is the only confirmation the operator gets.
+            eprintln!(
+                "{fork} scheduled at timestamp {} for chain ID {chain_id}{}",
+                raw.time,
+                if excluded { " (excluded from fork ID calculation)" } else { "" }
+            );
+        }
 
         let evm_limits_fork0 = if let Some(raw) = raw_evm_limits_fork0 {
             match op_chain_spec.op_fork_activation(OpHardfork::Karst) {
@@ -356,8 +452,8 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         Ok(Arc::new(ConduitOpChainSpec {
             inner: op_chain_spec,
-            state_override_fork0,
-            state_override_fork0_activation,
+            state_override_forks,
+            state_override_fork_activations,
             evm_limits_fork0,
         }))
     }
@@ -429,6 +525,36 @@ mod tests {
         serde_json::to_string(&genesis).unwrap()
     }
 
+    /// Genesis scheduling the leading state override rounds at `times`, each overriding the same
+    /// address with a distinguishable byte so the rounds can be told apart.
+    fn with_conduit_forks(times: &[u64]) -> String {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        let mut conduit = serde_json::Map::new();
+        for (idx, time) in times.iter().enumerate() {
+            conduit.insert(
+                format!("stateOverrideFork{idx}"),
+                serde_json::json!({
+                    "time": time,
+                    "updates": {
+                        "0x4200000000000000000000000000000000000042": {
+                            "code": format!("0x{:02x}", idx)
+                        }
+                    }
+                }),
+            );
+        }
+        genesis["config"]["conduit"] = serde_json::Value::Object(conduit);
+        serde_json::to_string(&genesis).unwrap()
+    }
+
+    /// As [`with_conduit_forks`], for a specific chain ID.
+    fn with_conduit_forks_for_chain(chain_id: u64, times: &[u64]) -> String {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks(times)).unwrap();
+        genesis["config"]["chainId"] = serde_json::json!(chain_id);
+        serde_json::to_string(&genesis).unwrap()
+    }
+
     fn with_conduit_fork_for_chain(chain_id: u64, time: u64) -> String {
         let mut genesis: serde_json::Value =
             serde_json::from_str(&with_conduit_fork(time)).unwrap();
@@ -477,7 +603,7 @@ mod tests {
         for &chain in ConduitOpChainSpecParser::SUPPORTED_CHAINS {
             let spec = ConduitOpChainSpecParser::parse(chain)
                 .unwrap_or_else(|_| panic!("Failed to parse {chain}"));
-            assert!(spec.state_override_fork0.is_none());
+            assert!(spec.state_override_forks().next().is_none());
         }
     }
 
@@ -502,7 +628,9 @@ mod tests {
         });
         let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
 
-        let config = spec.state_override_fork0.as_ref().expect("should have conduit config");
+        let config = spec
+            .state_override_fork(ConduitOpHardfork::StateOverrideFork0)
+            .expect("should have conduit config");
         assert_eq!(config.updates.len(), 2);
 
         assert_eq!(
@@ -527,11 +655,232 @@ mod tests {
     }
 
     #[test]
-    fn parse_genesis_without_conduit_config() {
-        let spec = parse_spec(BASE_GENESIS);
-        assert!(spec.state_override_fork0.is_none());
+    fn parse_genesis_with_both_state_override_forks() {
+        let spec = parse_spec(&with_conduit_forks(&[5000, 6000]));
+
+        let addr: Address = "0x4200000000000000000000000000000000000042".parse().unwrap();
+        let fork0 = spec
+            .state_override_fork(ConduitOpHardfork::StateOverrideFork0)
+            .expect("fork0 should be configured");
+        let fork1 = spec
+            .state_override_fork(ConduitOpHardfork::StateOverrideFork1)
+            .expect("fork1 should be configured");
+        assert_eq!(fork0.updates[&addr].code.as_ref().unwrap(), &Bytes::from_static(&[0x00]));
+        assert_eq!(fork1.updates[&addr].code.as_ref().unwrap(), &Bytes::from_static(&[0x01]));
+
         assert_eq!(
             spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
+            ForkCondition::Timestamp(5000),
+        );
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork1),
+            ForkCondition::Timestamp(6000),
+        );
+    }
+
+    /// Existing genesis files omit `blockTimeAtFork`, so the default has to stay at the 2s
+    /// spacing they were written under — changing it would alter their transition block.
+    #[test]
+    fn block_time_at_fork_defaults_to_two() {
+        let spec = parse_spec(&with_conduit_forks(&[5000]));
+        let config = spec.state_override_fork(ConduitOpHardfork::StateOverrideFork0).unwrap();
+        assert_eq!(config.block_time_at_fork, DEFAULT_BLOCK_TIME_AT_FORK);
+        assert_eq!(config.block_time_at_fork, 2);
+    }
+
+    #[test]
+    fn block_time_at_fork_is_configurable_per_round() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks(&[5000, 6000])).unwrap();
+        genesis["config"]["conduit"]["stateOverrideFork0"]["blockTimeAtFork"] =
+            serde_json::json!(1);
+        let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+
+        // Set on the first round only; the second keeps the default.
+        assert_eq!(
+            spec.state_override_fork(ConduitOpHardfork::StateOverrideFork0)
+                .unwrap()
+                .block_time_at_fork,
+            1,
+        );
+        assert_eq!(
+            spec.state_override_fork(ConduitOpHardfork::StateOverrideFork1)
+                .unwrap()
+                .block_time_at_fork,
+            DEFAULT_BLOCK_TIME_AT_FORK,
+        );
+    }
+
+    /// A misspelled round-level key used to be ignored, which is worst for `blockTimeAtFork`:
+    /// the round would silently fall back to the 2s default, and on a 1s chain that re-applies
+    /// the override at `ts + 1` over the transition block's own writes.
+    #[test]
+    fn state_override_round_rejects_unknown_keys() {
+        for typo in ["block_time_at_fork", "blocktimeatfork", "blockTime"] {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_conduit_forks(&[5000])).unwrap();
+            let round = genesis["config"]["conduit"]["stateOverrideFork0"].as_object_mut().unwrap();
+            round.remove("blockTimeAtFork");
+            round.insert(typo.to_string(), serde_json::json!(1));
+
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap())
+                .map(|_| ())
+                .expect_err(&format!("{typo} should be rejected"));
+            let message = err.to_string();
+            assert!(
+                message.contains("unknown field") && message.contains(typo),
+                "{typo}: unexpected error: {message}",
+            );
+            // The error names the accepted spelling, so the fix is obvious from the message.
+            assert!(message.contains("blockTimeAtFork"), "{typo}: error should name the real key");
+        }
+    }
+
+    /// Zero would compare the block's timestamp against itself, so the round could never fire.
+    #[test]
+    fn block_time_at_fork_rejects_zero() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks(&[5000])).unwrap();
+        genesis["config"]["conduit"]["stateOverrideFork0"]["blockTimeAtFork"] =
+            serde_json::json!(0);
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("StateOverrideFork0 blockTimeAtFork must be greater than zero"),
+            "unexpected error: {err}",
+        );
+    }
+
+    /// Rounds must be contiguous from 0. A gap after the first round is the easy case to miss:
+    /// checking only "is any earlier round configured" would accept fork0 + fork2 and silently
+    /// drop the prerequisite the genesis meant to schedule.
+    #[test]
+    fn state_override_rounds_reject_gaps() {
+        // Leading gap: fork1 without fork0.
+        let mut leading: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        leading["config"]["conduit"] = serde_json::json!({
+            "stateOverrideFork1": { "time": 5000, "updates": {} }
+        });
+
+        // Interior gap: fork0 and fork2, no fork1.
+        let mut interior: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks(&[5000])).unwrap();
+        interior["config"]["conduit"]["stateOverrideFork2"] =
+            serde_json::json!({ "time": 6000, "updates": {} });
+
+        for (label, genesis, expected) in [
+            ("leading", leading, "StateOverrideFork1 requires StateOverrideFork0"),
+            ("interior", interior, "StateOverrideFork2 requires StateOverrideFork1"),
+        ] {
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap())
+                .map(|_| ())
+                .expect_err(&format!("{label} gap should be rejected"));
+            assert!(err.to_string().contains(expected), "{label}: unexpected error: {err}");
+        }
+    }
+
+    /// The second round rewrites state left by the first, so an earlier or equal activation is a
+    /// misconfiguration rather than something to resolve at runtime.
+    #[test]
+    fn state_override_fork1_must_activate_after_fork0() {
+        for fork1_time in [4999, 5000] {
+            let err = try_parse_spec(&with_conduit_forks(&[5000, fork1_time])).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!(
+                    "StateOverrideFork1 timestamp {fork1_time} must be after StateOverrideFork0 \
+                     timestamp 5000"
+                )),
+                "unexpected error: {err}",
+            );
+        }
+    }
+
+    /// Two rounds must produce three distinct fork ID stages, each announcing the next.
+    #[test]
+    fn fork_ids_with_both_custom_forks() {
+        let spec = parse_spec(&with_conduit_forks(&[5000, 6000]));
+
+        let base = spec.fork_id(&head_at(4999));
+        let after_fork0 = spec.fork_id(&head_at(5000));
+        let after_fork1 = spec.fork_id(&head_at(6000));
+
+        assert_eq!(base.next, 5000);
+        assert_eq!(after_fork0.next, 6000);
+        assert_eq!(after_fork1.next, 0);
+        assert_ne!(base.hash, after_fork0.hash);
+        assert_ne!(after_fork0.hash, after_fork1.hash);
+    }
+
+    /// On the legacy networks the exclusion covers only the rounds their peers predate: the
+    /// first `STATE_OVERRIDE_FORK_ID_EXCLUDED_ROUNDS` stay out of the fork ID, and every later
+    /// round contributes as it would anywhere else.
+    #[test]
+    fn excluded_chain_ids_exclude_only_the_earliest_rounds() {
+        let times: Vec<u64> =
+            (0..STATE_OVERRIDE_FORKS.len()).map(|i| 5000 + i as u64 * 1000).collect();
+
+        for &chain_id in STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS {
+            let spec = parse_spec(&with_conduit_forks_for_chain(chain_id, &times));
+            let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
+
+            for (idx, fork) in STATE_OVERRIDE_FORKS.into_iter().enumerate() {
+                let excluded = idx < STATE_OVERRIDE_FORK_ID_EXCLUDED_ROUNDS;
+                assert_eq!(
+                    !names.contains(&fork.name()),
+                    excluded,
+                    "{fork} fork ID membership wrong for chain {chain_id}, got: {names:?}",
+                );
+                // Every round activates either way; only the fork ID contribution is suppressed.
+                assert!(spec.is_conduit_op_fork_active_at_timestamp(fork, times[idx]));
+            }
+
+            // The excluded rounds leave the fork ID untouched, so it only starts moving at the
+            // first round that does participate.
+            let excluded_tip = times[STATE_OVERRIDE_FORK_ID_EXCLUDED_ROUNDS - 1];
+            let first_included = times[STATE_OVERRIDE_FORK_ID_EXCLUDED_ROUNDS];
+            assert_eq!(spec.fork_id(&head_at(0)).hash, spec.fork_id(&head_at(excluded_tip)).hash);
+            assert_eq!(spec.fork_id(&head_at(0)).next, first_included);
+            assert_ne!(
+                spec.fork_id(&head_at(excluded_tip)).hash,
+                spec.fork_id(&head_at(first_included)).hash,
+            );
+        }
+    }
+
+    /// A chain that is not on the legacy list carries every round in its fork ID.
+    #[test]
+    fn unlisted_chain_ids_include_every_round_in_fork_ids() {
+        let times: Vec<u64> =
+            (0..STATE_OVERRIDE_FORKS.len()).map(|i| 5000 + i as u64 * 1000).collect();
+        let spec = parse_spec(&with_conduit_forks(&times));
+
+        let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
+        for fork in STATE_OVERRIDE_FORKS {
+            assert!(names.contains(&fork.name()), "{fork} missing from fork ID, got: {names:?}");
+        }
+
+        // Each round is its own fork ID stage, announcing the next.
+        for (idx, time) in times.iter().enumerate() {
+            let id = spec.fork_id(&head_at(*time));
+            let expected_next = times.get(idx + 1).copied().unwrap_or(0);
+            assert_eq!(id.next, expected_next, "wrong next at round {idx}");
+            if idx > 0 {
+                assert_ne!(id.hash, spec.fork_id(&head_at(times[idx - 1])).hash);
+            }
+        }
+    }
+
+    #[test]
+    fn parse_genesis_without_conduit_config() {
+        let spec = parse_spec(BASE_GENESIS);
+        assert!(spec.state_override_forks().next().is_none());
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
+            ForkCondition::Never,
+        );
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork1),
             ForkCondition::Never,
         );
         assert_eq!(
@@ -779,7 +1128,10 @@ mod tests {
                 spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
                 ForkCondition::Timestamp(5000),
             );
-            assert!(spec.is_state_override_fork0_active_at_timestamp(5000));
+            assert!(spec.is_conduit_op_fork_active_at_timestamp(
+                ConduitOpHardfork::StateOverrideFork0,
+                5000
+            ));
 
             let names: Vec<&str> = spec.forks_iter().map(|(f, _)| f.name()).collect();
             assert!(
@@ -819,11 +1171,9 @@ mod tests {
         let json = serde_json::to_string(&genesis).unwrap();
         let spec = parse_spec(&json);
 
-        assert!(
-            spec.state_override_fork0.is_some(),
-            "state_override_fork0 should be Some when conduit section is present in saigon genesis"
+        let config = spec.state_override_fork(ConduitOpHardfork::StateOverrideFork0).expect(
+            "StateOverrideFork0 should be configured from the saigon genesis conduit section",
         );
-        let config = spec.state_override_fork0.as_ref().unwrap();
         assert_eq!(config.updates.len(), 1);
     }
 }

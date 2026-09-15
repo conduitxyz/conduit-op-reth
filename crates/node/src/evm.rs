@@ -1,11 +1,11 @@
 //! Custom EVM configuration and block executor for ConduitOp state transitions.
 //!
 //! Wraps the standard OP EVM config and block executor to apply state overrides
-//! at the `StateOverrideFork0` activation block.
+//! at each state override round's activation block.
 
 use crate::{
     chainspec::ConduitOpChainSpec, hardforks::ConduitOpHardforks,
-    state_override_fork0::ensure_state_override_fork0,
+    state_override::ensure_state_override,
 };
 use alloy_consensus::Header;
 use alloy_evm::{
@@ -47,7 +47,7 @@ type InnerBlockExecutorFactory =
 
 /// Custom block executor wrapping [`OpBlockExecutor`].
 ///
-/// Applies account state overrides when `StateOverrideFork0` first activates,
+/// Applies account state overrides when each state override round first activates,
 /// using the OP Stack 2-second block time heuristic to detect the transition block.
 pub struct ConduitOpBlockExecutor<E, R: OpReceiptBuilder, Spec> {
     inner: OpBlockExecutor<E, R, Spec>,
@@ -77,11 +77,15 @@ where
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.inner.apply_pre_execution_changes()?;
 
-        // Apply state overrides at the StateOverrideFork0 transition block.
-        if let Some(ref config) = self.chain_spec.state_override_fork0 {
-            ensure_state_override_fork0(
-                self.chain_spec.as_ref(),
-                self.inner.evm.block().timestamp().saturating_to(),
+        // Apply state overrides at each round's transition block. Rounds are visited in
+        // activation order, so if two transition windows ever overlap the later round wins.
+        let timestamp = self.inner.evm.block().timestamp().saturating_to();
+        let chain_spec = self.chain_spec.clone();
+        for (fork, config) in chain_spec.state_override_forks() {
+            ensure_state_override(
+                chain_spec.as_ref(),
+                fork,
+                timestamp,
                 config,
                 self.inner.evm.db_mut(),
             )
