@@ -74,7 +74,29 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libtss2-dev
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  features:
+    name: Check feature combinations
+    runs-on: ubuntu-latest-4core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libtss2-dev
+
+      - name: Install cargo-hack
+        run: cargo install cargo-hack --locked
+
+      - name: Check each feature
+        run: cargo hack check --workspace --each-feature --no-dev-deps
 
   deny:
     name: Security audit
@@ -120,7 +142,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libtss2-dev
 
       - name: Check documentation
-        run: cargo doc --all --no-deps --document-private-items
+        run: cargo doc --all --no-deps --document-private-items --all-features --locked
         env:
           RUSTDOCFLAGS: "-D warnings"
 
@@ -150,7 +172,7 @@ jobs:
         # node and replay every block; run alongside the rest of the suite their accumulated memory
         # OOM-kills the 16GB runner on a later test (reproducible even with a warm cache). They run
         # on their own in the dedicated proofs-history-e2e job below.
-        run: cargo test --workspace -- --test-threads=1 --skip test_proofs_history_tracks_state_override_fork
+        run: cargo test --workspace --all-features --locked -- --test-threads=1 --skip test_proofs_history_tracks_state_override_fork
 
   proofs-history-e2e:
     name: Proofs-history e2e (isolated)
@@ -172,4 +194,4 @@ jobs:
       - name: Run proofs-history e2e tests
         # Run the heavy proofs-history e2e tests in isolation (own runner) so their in-process
         # node memory doesn't accumulate with the rest of the suite and OOM the runner.
-        run: cargo test -p conduit-op-reth --test e2e_integration -- --test-threads=1 test_proofs_history_tracks_state_override_fork
+        run: cargo test -p conduit-op-reth --test e2e_integration --all-features --locked -- --test-threads=1 test_proofs_history_tracks_state_override_fork
