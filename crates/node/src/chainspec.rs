@@ -347,31 +347,32 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
         let mut state_override_forks = [const { None }; STATE_OVERRIDE_FORKS.len()];
         let mut state_override_fork_activations =
             [ForkCondition::Never; STATE_OVERRIDE_FORKS.len()];
-        let mut previous_round: Option<(ConduitOpHardfork, u64)> = None;
+        let mut previous_round: Option<(usize, ConduitOpHardfork, u64)> = None;
 
         for (idx, raw) in raw_state_override_forks.into_iter().enumerate() {
             let fork = STATE_OVERRIDE_FORKS[idx];
             let Some(raw) = raw else { continue };
 
             // Each round rewrites state left by the previous one, so the rounds must be
-            // configured in order and activate strictly in sequence. Without this a genesis could
-            // schedule a later round first and have it applied in an order it does not express.
-            match previous_round {
-                None if idx > 0 => {
-                    return Err(eyre::eyre!(
-                        "{fork} requires {} to be configured",
-                        STATE_OVERRIDE_FORKS[idx - 1]
-                    ));
-                }
-                Some((previous_fork, previous_time)) if raw.time <= previous_time => {
-                    return Err(eyre::eyre!(
-                        "{fork} timestamp {} must be after {previous_fork} timestamp {previous_time}",
-                        raw.time
-                    ));
-                }
-                _ => {}
+            // configured contiguously from 0 and activate strictly in sequence. Checking against
+            // the immediately preceding index rather than "any earlier round" also rejects an
+            // interior gap, which would otherwise silently drop an intended prerequisite.
+            if idx != previous_round.map_or(0, |(previous_idx, _, _)| previous_idx + 1) {
+                // Unreachable for idx 0: with no previous round the expected index is 0.
+                return Err(eyre::eyre!(
+                    "{fork} requires {} to be configured",
+                    STATE_OVERRIDE_FORKS[idx - 1]
+                ));
             }
-            previous_round = Some((fork, raw.time));
+            if let Some((_, previous_fork, previous_time)) = previous_round &&
+                raw.time <= previous_time
+            {
+                return Err(eyre::eyre!(
+                    "{fork} timestamp {} must be after {previous_fork} timestamp {previous_time}",
+                    raw.time
+                ));
+            }
+            previous_round = Some((idx, fork, raw.time));
 
             // A zero block time would make the transition check compare the timestamp against
             // itself, so the round could never fire.
@@ -724,6 +725,34 @@ mod tests {
                 .contains("StateOverrideFork0 blockTimeAtFork must be greater than zero"),
             "unexpected error: {err}",
         );
+    }
+
+    /// Rounds must be contiguous from 0. A gap after the first round is the easy case to miss:
+    /// checking only "is any earlier round configured" would accept fork0 + fork2 and silently
+    /// drop the prerequisite the genesis meant to schedule.
+    #[test]
+    fn state_override_rounds_reject_gaps() {
+        // Leading gap: fork1 without fork0.
+        let mut leading: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        leading["config"]["conduit"] = serde_json::json!({
+            "stateOverrideFork1": { "time": 5000, "updates": {} }
+        });
+
+        // Interior gap: fork0 and fork2, no fork1.
+        let mut interior: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks(&[5000])).unwrap();
+        interior["config"]["conduit"]["stateOverrideFork2"] =
+            serde_json::json!({ "time": 6000, "updates": {} });
+
+        for (label, genesis, expected) in [
+            ("leading", leading, "StateOverrideFork1 requires StateOverrideFork0"),
+            ("interior", interior, "StateOverrideFork2 requires StateOverrideFork1"),
+        ] {
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap())
+                .map(|_| ())
+                .expect_err(&format!("{label} gap should be rejected"));
+            assert!(err.to_string().contains(expected), "{label}: unexpected error: {err}");
+        }
     }
 
     /// The second round rewrites state left by the first, so an earlier or equal activation is a
