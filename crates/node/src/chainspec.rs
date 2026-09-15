@@ -233,7 +233,7 @@ impl ConduitOpGenesisConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StateOverrideForkRaw {
     time: u64,
     /// Defaults to [`DEFAULT_BLOCK_TIME_AT_FORK`] so existing genesis files are unchanged.
@@ -709,6 +709,31 @@ mod tests {
                 .block_time_at_fork,
             DEFAULT_BLOCK_TIME_AT_FORK,
         );
+    }
+
+    /// A misspelled round-level key used to be ignored, which is worst for `blockTimeAtFork`:
+    /// the round would silently fall back to the 2s default, and on a 1s chain that re-applies
+    /// the override at `ts + 1` over the transition block's own writes.
+    #[test]
+    fn state_override_round_rejects_unknown_keys() {
+        for typo in ["block_time_at_fork", "blocktimeatfork", "blockTime"] {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_conduit_forks(&[5000])).unwrap();
+            let round = genesis["config"]["conduit"]["stateOverrideFork0"].as_object_mut().unwrap();
+            round.remove("blockTimeAtFork");
+            round.insert(typo.to_string(), serde_json::json!(1));
+
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap())
+                .map(|_| ())
+                .expect_err(&format!("{typo} should be rejected"));
+            let message = err.to_string();
+            assert!(
+                message.contains("unknown field") && message.contains(typo),
+                "{typo}: unexpected error: {message}",
+            );
+            // The error names the accepted spelling, so the fix is obvious from the message.
+            assert!(message.contains("blockTimeAtFork"), "{typo}: error should name the real key");
+        }
     }
 
     /// Zero would compare the block's timestamp against itself, so the round could never fire.
