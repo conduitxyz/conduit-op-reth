@@ -96,7 +96,7 @@ jobs:
         run: cargo install cargo-hack --locked
 
       - name: Check each feature
-        run: cargo hack check --workspace --each-feature --no-dev-deps --locked
+        run: cargo hack check --workspace --each-feature --no-dev-deps
 
   deny:
     name: Security audit
