@@ -4,10 +4,12 @@
 //! owns the Slipstream mailbox. This module forwards the batch unchanged to
 //! the configured leader-aware sequencer endpoint and returns its response.
 
+use alloy_eips::eip2930::AccessList;
 use alloy_primitives::Bytes;
 use conduit_op_reth_rpc_api::{
     SEND_RAW_TRANSACTION_BATCH_METHOD, SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD,
-    SlipstreamApiServer, SlipstreamBatchAck, SlipstreamHintedTx,
+    SlipstreamApiServer, SlipstreamBatchAck, SlipstreamHintedTx, SlipstreamWarmAck,
+    WARM_HINTS_METHOD,
 };
 use jsonrpsee::core::{RpcResult, async_trait};
 use reth_optimism_rpc::SequencerClient;
@@ -45,6 +47,12 @@ impl SlipstreamApiServer for SlipstreamProxy {
             .request(SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD, (txs,))
             .await
             .map_err(Into::into)
+    }
+
+    async fn warm_hints(&self, hints: Vec<AccessList>) -> RpcResult<SlipstreamWarmAck> {
+        // Forwarded like the other two: the replica owns no mailbox and no prewarm pool, so the
+        // hints have to reach whichever node is building.
+        self.sequencer_client.request(WARM_HINTS_METHOD, (hints,)).await.map_err(Into::into)
     }
 }
 
@@ -127,6 +135,10 @@ mod tests {
         ) -> RpcResult<SlipstreamBatchAck> {
             Ok(SlipstreamBatchAck::default())
         }
+
+        async fn warm_hints(&self, hints: Vec<AccessList>) -> RpcResult<SlipstreamWarmAck> {
+            Ok(SlipstreamWarmAck { accepted: hints.len() })
+        }
     }
 
     #[test]
@@ -135,8 +147,11 @@ mod tests {
         let mut method_names = module.method_names().collect::<Vec<_>>();
         method_names.sort_unstable();
 
-        let mut expected =
-            [SEND_RAW_TRANSACTION_BATCH_METHOD, SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD];
+        let mut expected = [
+            SEND_RAW_TRANSACTION_BATCH_METHOD,
+            SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD,
+            WARM_HINTS_METHOD,
+        ];
         expected.sort_unstable();
         assert_eq!(method_names, expected);
         assert!(!module.method_names().any(|name| name == "eth_sendRawTransaction"));

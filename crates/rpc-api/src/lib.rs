@@ -16,6 +16,9 @@ pub const SEND_RAW_TRANSACTION_BATCH_METHOD: &str = "slipstream_sendRawTransacti
 pub const SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD: &str =
     "slipstream_sendRawTransactionBatchWithHints";
 
+/// Method name for [`SlipstreamApiServer::warm_hints`].
+pub const WARM_HINTS_METHOD: &str = "slipstream_warmHints";
+
 /// A transaction executed into a published flashblock.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SlipstreamIncludedTx {
