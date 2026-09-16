@@ -80,6 +80,33 @@ pub trait SlipstreamApi {
         &self,
         txs: Vec<SlipstreamHintedTx>,
     ) -> RpcResult<SlipstreamBatchAck>;
+
+    /// Prewarms state without submitting anything.
+    ///
+    /// The hints-only counterpart to [`Self::send_raw_transaction_batch_with_hints`]: same
+    /// advisory access lists, same prewarming, but no transactions and therefore no verdicts.
+    ///
+    /// This exists so a hint producer can sit OFF the submission path. A producer that mirrors
+    /// traffic already sees transactions on their way here, so delivering hints with a method
+    /// that also submits would submit each of them a second time -- which is why
+    /// `conduit-hinter` refuses mirror mode with a submitting transport. Hints carried on their
+    /// own can be delivered from anywhere, by anyone, without affecting what executes.
+    ///
+    /// Advisory like every other hint path: never consulted for admission, and dropped outright
+    /// when the builder has no prewarm pool lent out.
+    #[method(name = "warmHints")]
+    async fn warm_hints(&self, hints: Vec<AccessList>) -> RpcResult<SlipstreamWarmAck>;
+}
+
+/// Response of `slipstream_warmHints`.
+///
+/// Reports what the call handed to the prewarm pool, not what the pool did with it: warming is
+/// fire-and-forget, and a target enqueued while no pool is lent is stashed or dropped without
+/// telling the caller. Treat this as an acknowledgement, not a measurement.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SlipstreamWarmAck {
+    /// Access lists accepted from this call.
+    pub accepted: usize,
 }
 
 #[cfg(test)]
