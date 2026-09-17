@@ -26,12 +26,9 @@ use tracing::info;
 /// Applies the state updates configured for `fork` at its transition block.
 ///
 /// Each update entry can set `code` (bytecode) and/or `storage` slots on a target address.
-/// Existing account balance and nonce are preserved.
-///
-/// **Important**: Storage overrides on an address that has no code (and no balance/nonce) will
-/// be silently discarded by EIP-161 state clear when committed to `State<DB>`. Always pair
-/// storage overrides with a `code` field, or target an address that already has a non-empty
-/// account (balance, nonce, or code).
+/// Existing account balance and nonce are preserved. Storage-only updates can also target an
+/// otherwise empty account; those accounts are marked as created so EIP-161 state clearing does
+/// not discard the configured storage during `State<DB>` commits.
 ///
 /// Detects the transition block by looking back one block time, the same trick Canyon's
 /// `ensure_create2_deployer` uses to avoid needing the parent block's timestamp. The look-back
@@ -87,6 +84,14 @@ where
                 revm_acc
                     .storage
                     .insert(key, EvmStorageSlot::new_changed(original, value, TransactionId::ZERO));
+            }
+
+            // `State<DB>::commit` clears touched empty accounts under EIP-161. A storage-only
+            // hardfork override still represents an intentional state creation, so mirror
+            // alloy-evm's stateDiff handling and mark the account as created when it has no
+            // balance, nonce, or code of its own.
+            if revm_acc.info.is_empty() && !storage.is_empty() {
+                revm_acc.mark_created();
             }
         }
 
@@ -286,11 +291,10 @@ mod tests {
         assert_eq!(info.nonce, 5);
     }
 
-    /// Storage overrides on an empty account (no code, balance, or nonce) are silently
-    /// discarded by EIP-161 state clear when committed to `State<DB>`. Always pair
-    /// storage overrides with code.
+    /// Storage-only overrides on an otherwise empty account are intentional hardfork state and
+    /// must survive the EIP-161 state-clear path used by `State<DB>` commits.
     #[test]
-    fn storage_only_on_empty_account_is_discarded_by_eip161() {
+    fn storage_only_on_empty_account_persists() {
         use revm::{Database as _, database::State};
 
         let spec = MockSpec::fork0_at(1000);
@@ -306,8 +310,8 @@ mod tests {
         let slot = db.storage(addr, U256::from(0x01)).unwrap();
         assert_eq!(
             slot,
-            U256::ZERO,
-            "storage-only override on empty account should be discarded by EIP-161 state clear"
+            U256::from(0xff),
+            "storage-only override on empty account should survive EIP-161 state clear"
         );
     }
 
