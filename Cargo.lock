@@ -2456,6 +2456,7 @@ dependencies = [
 name = "conduit-op-reth-rpc-api"
 version = "2.3.0"
 dependencies = [
+ "alloy-eips",
  "alloy-primitives",
  "jsonrpsee",
  "serde",
