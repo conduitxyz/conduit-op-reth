@@ -117,6 +117,9 @@ fn test_node_config(chain_spec: Arc<ConduitOpChainSpec>) -> NodeConfig<ConduitOp
     c.engine.persistence_threshold = 0;
     c.engine.memory_block_buffer_target = 0;
     c.engine.prewarming_disabled = true;
+    // Keep execution caching enabled, but match reth's 1 MiB unit-test budget rather than
+    // its 4096 MiB production default, which exhausts CI memory across sequential nodes.
+    c.engine.cross_block_cache_size = 1;
     c.network.no_persist_peers = true;
     c.network.disable_tx_gossip = true;
     c.network.max_peers = Some(0);
