@@ -11,8 +11,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cargo_builder = CargoBuilder::default().features(true).target_triple(true).build()?;
     emitter.add_instructions(&cargo_builder)?;
 
+    // `describe(tags = true, ..)` so lightweight release tags are found as well (plain
+    // `git describe` only considers annotated tags, which made every release cut from a
+    // lightweight tag report a "-dev" version).
     let git_builder =
-        Git2Builder::default().describe(false, true, None).dirty(true).sha(false).build()?;
+        Git2Builder::default().describe(true, true, None).dirty(true).sha(false).build()?;
     emitter.add_instructions(&git_builder)?;
 
     emitter.emit_and_set()?;
