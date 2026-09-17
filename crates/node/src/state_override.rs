@@ -540,9 +540,8 @@ mod tests {
         }
     }
 
-    /// Rounds landing in the same transition window apply in fork order, so the later round
-    /// wins. Guards the ordering of the loop in
-    /// [`ConduitOpBlockExecutor`](crate::evm::ConduitOpBlockExecutor).
+    /// Both activation guards accept the same transition window, and the last call wins.
+    /// The e2e overlap test separately checks the actual executor's round ordering.
     #[test]
     fn later_round_wins_when_transition_windows_overlap() {
         let spec = MockSpec::rounds_at(&[1000, 1001]);
