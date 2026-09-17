@@ -47,18 +47,24 @@ conduit-op-reth node --chain genesis.json \
 
 Supported requests for blocks below `32956469` are forwarded; the cutoff block and later blocks
 are served locally. The override also works when Bedrock activated at block zero. It does not
-change the genesis, hardfork activation, or peer fork ID.
+change the genesis hash, hardfork activation, or peer fork ID.
 
-Omit `--rollup.historicalrpc.block` to preserve upstream behavior: use `bedrockBlock` as the cutoff,
-with forwarding disabled when Bedrock has no positive block activation. The override requires
-`--rollup.historicalrpc`.
+Alternatively, set `"migrationBlock": 32956469` in the genesis `config` object (alongside
+`bedrockBlock`, not inside `conduit`) and supply only `--rollup.historicalrpc` on the CLI.
+The cutoff precedence is CLI `--rollup.historicalrpc.block` → genesis `config.migrationBlock` →
+upstream `bedrockBlock`. `migrationBlock` accepts an unsigned 64-bit JSON integer; omitted or
+`null` means unset, while zero is an explicit cutoff. A CLI cutoff of zero also overrides genesis.
 
-The explicit override wraps only methods already enabled on each public transport (HTTP/WS/IPC);
-it does not expose disabled namespaces or alter Engine API authentication. Historical requests
+With neither cutoff configured, upstream behavior is preserved, including disabled forwarding
+when Bedrock has no positive block activation. The CLI cutoff requires `--rollup.historicalrpc`;
+genesis `migrationBlock` alone does not require an endpoint or enable forwarding.
+
+Both CLI and genesis cutoffs wrap only methods already enabled on each public transport (HTTP/WS/IPC);
+forwarding does not expose disabled namespaces or alter Engine API authentication. Historical requests
 have a 30-second deadline and a shared limit of 16 in-flight requests, with excess work rejected
 without queueing. Downloads and single/batch responses respect the configured RPC size limits.
 Use a trusted historical endpoint and retain normal ingress rate limits; forwarding still creates
-backend load. These safeguards apply to the explicit override, not the unchanged upstream default.
+backend load. These safeguards apply to CLI/genesis cutoffs, not the unchanged upstream default.
 
 Unknown block/transaction hashes are forwarded optimistically, even with an explicit zero cutoff.
 Backend failures fall back to the original local handler. Each call makes at most one historical

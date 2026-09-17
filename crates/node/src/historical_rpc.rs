@@ -32,8 +32,14 @@ pub struct HistoricalRpcOverride {
 }
 
 impl HistoricalRpcOverride {
+    /// Prefer the CLI cutoff to genesis. Genesis alone does not require or enable an endpoint.
     /// Remove the upstream endpoint only when overriding, preventing duplicate forwarding.
-    pub fn take(args: &mut RollupArgs, cutoff: Option<u64>) -> eyre::Result<Option<Self>> {
+    pub fn take(
+        args: &mut RollupArgs,
+        cutoff: Option<u64>,
+        migration_block: Option<u64>,
+    ) -> eyre::Result<Option<Self>> {
+        let cutoff = cutoff.or(migration_block.filter(|_| args.historical_rpc.is_some()));
         cutoff
             .map(|cutoff| {
                 let endpoint = args.historical_rpc.take().ok_or_else(|| {
@@ -218,6 +224,21 @@ impl ToRpcParams for RawParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cutoff_requires_an_endpoint() {
+        let mut args = RollupArgs::default();
+        assert!(HistoricalRpcOverride::take(&mut args, None, Some(42)).unwrap().is_none());
+        assert!(HistoricalRpcOverride::take(&mut args, Some(5), Some(42)).is_err());
+
+        args.historical_rpc = Some("http://localhost:8545".into());
+        assert!(HistoricalRpcOverride::take(&mut args, None, None).unwrap().is_none());
+        assert_eq!(args.historical_rpc.as_deref(), Some("http://localhost:8545"));
+        let override_rpc =
+            HistoricalRpcOverride::take(&mut args, Some(0), Some(42)).unwrap().unwrap();
+        assert_eq!(override_rpc.cutoff, 0);
+        assert!(args.historical_rpc.is_none());
+    }
 
     #[tokio::test]
     async fn https_client_builds_with_workspace_tls_features() {

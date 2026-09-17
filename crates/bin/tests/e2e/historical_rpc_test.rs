@@ -29,21 +29,30 @@ async fn historical_rpc_cutoff() -> eyre::Result<()> {
     })?;
     let server_handle = server.start(module);
 
-    // (Bedrock, override, block, should forward). A smaller override catches accidentally
+    // (Bedrock, migration, CLI override, queries). A smaller override catches accidentally
     // retaining the upstream layer; Bedrock=0 catches its upstream "disabled" special case.
-    for (bedrock, cutoff, queries) in [
-        (0, Some(10), vec![(9, true), (10, false), (11, false)]),
-        (10, Some(5), vec![(4, true), (5, false), (9, false)]),
-        (10, None, vec![(9, true), (10, false)]),
-        (0, None, vec![(9, false)]),
-        (10, Some(0), vec![(0, false), (9, false)]),
+    for (bedrock, migration, cutoff, queries) in [
+        (0, None, Some(10), vec![(9, true), (10, false), (11, false)]),
+        (10, None, Some(5), vec![(4, true), (5, false), (9, false)]),
+        (10, None, None, vec![(9, true), (10, false)]),
+        (0, None, None, vec![(9, false)]),
+        (10, None, Some(0), vec![(0, false), (9, false)]),
+        (0, Some(10), None, vec![(9, true), (10, false), (11, false)]),
+        (10, Some(5), None, vec![(4, true), (5, false), (9, false)]),
+        (10, Some(8), Some(5), vec![(4, true), (5, false), (7, false)]),
+        (0, Some(5), Some(8), vec![(5, true), (7, true), (8, false)]),
+        (10, Some(8), Some(0), vec![(0, false), (7, false)]),
+        (10, Some(0), None, vec![(0, false), (9, false)]),
     ] {
         let mut genesis: Value = serde_json::from_str(BASE_GENESIS)?;
         genesis["config"]["bedrockBlock"] = json!(bedrock);
+        if let Some(migration) = migration {
+            genesis["config"]["migrationBlock"] = json!(migration);
+        }
         let chain = parse_chain_spec(&genesis.to_string());
         let genesis_hash = reth_chainspec::EthChainSpec::genesis_hash(chain.as_ref());
         let mut args = RollupArgs { historical_rpc: Some(endpoint.clone()), ..Default::default() };
-        let historical_rpc = HistoricalRpcOverride::take(&mut args, cutoff)?;
+        let historical_rpc = HistoricalRpcOverride::take(&mut args, cutoff, chain.migration_block)?;
         let tasks = Runtime::test();
         let handle = NodeBuilder::new(test_node_config(chain))
             .testing_node(tasks.clone())
@@ -71,9 +80,12 @@ async fn historical_rpc_cutoff() -> eyre::Result<()> {
             } else {
                 Value::Null // These blocks do not exist locally.
             };
-            assert_eq!(response, expected, "bedrock={bedrock}, cutoff={cutoff:?}, block={block}");
+            assert_eq!(
+                response, expected,
+                "bedrock={bedrock}, migration={migration:?}, cutoff={cutoff:?}, block={block}"
+            );
         }
-        if cutoff.is_some() {
+        if cutoff.is_some() || migration.is_some() {
             let hash = alloy_primitives::B256::repeat_byte(0x42);
             let receipt: Value =
                 client.request("eth_getTransactionReceipt", rpc_params![hash]).await?;
@@ -114,7 +126,7 @@ async fn historical_rpc_security_limits() -> eyre::Result<()> {
     })?;
     let upstream = server.start(module);
     let mut args = RollupArgs { historical_rpc: Some(endpoint), ..Default::default() };
-    let historical_rpc = HistoricalRpcOverride::take(&mut args, Some(10))?.unwrap();
+    let historical_rpc = HistoricalRpcOverride::take(&mut args, None, Some(10))?.unwrap();
     let mut config = test_node_config(parse_chain_spec(BASE_GENESIS));
     config.rpc =
         config.rpc.with_http_api("eth".parse()?).with_ws().with_ws_api("eth,debug".parse()?);

@@ -46,8 +46,9 @@ pub async fn launch_node(
     historical_rpc_block: Option<u64>,
 ) -> eyre::Result<(), ErrReport> {
     validate_slipstream_config(&args, slipstream_enabled)?;
-    let historical_rpc = HistoricalRpcOverride::take(&mut args, historical_rpc_block)?;
     let config = builder.config();
+    let historical_rpc =
+        HistoricalRpcOverride::take(&mut args, historical_rpc_block, config.chain.migration_block)?;
     if let Some(max_initcode_size) =
         config.chain.evm_limits_fork0.and_then(|limits| limits.max_initcode_size) &&
         max_initcode_size >= config.txpool.max_tx_input_bytes

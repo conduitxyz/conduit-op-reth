@@ -32,8 +32,9 @@ struct ConduitRollupArgs {
     #[arg(long = "conduit.slipstream")]
     slipstream: bool,
 
-    /// Forward historical RPC requests below this block instead of Bedrock.
-    /// The cutoff block itself is served locally; does not change the chain's hardforks.
+    /// Forward historical RPC requests below this block, overriding genesis migrationBlock or
+    /// Bedrock. The cutoff block itself is served locally; does not change the chain's
+    /// hardforks.
     #[arg(long = "rollup.historicalrpc.block", value_name = "BLOCK", requires = "historical_rpc")]
     historical_rpc_block: Option<u64>,
 }

@@ -65,6 +65,8 @@ pub struct EvmLimitsFork0Config {
 pub struct ConduitOpChainSpec {
     /// Inner OP chain spec (handles all standard OP + Ethereum hardforks).
     pub inner: OpChainSpec,
+    /// Exclusive historical RPC cutoff from genesis; not a consensus hardfork.
+    pub migration_block: Option<u64>,
     /// Configuration per state override round, indexed as in [`STATE_OVERRIDE_FORKS`]
     /// (`None` where that round is not configured).
     state_override_forks: [Option<StateOverrideForkConfig>; STATE_OVERRIDE_FORKS.len()],
@@ -191,10 +193,12 @@ impl ConduitOpHardforks for ConduitOpChainSpec {
     }
 }
 
-/// Top-level extra fields in genesis `config` containing the `"conduit"` key.
+/// Additional fields in genesis `config`.
 #[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct GenesisExtraFields {
     conduit: Option<ConduitOpGenesisConfig>,
+    migration_block: Option<u64>,
 }
 
 /// Raw JSON structure for the `"conduit"` section in genesis `config`.
@@ -301,6 +305,7 @@ impl From<OpChainSpec> for ConduitOpChainSpec {
     fn from(inner: OpChainSpec) -> Self {
         Self {
             inner,
+            migration_block: None,
             state_override_forks: [const { None }; STATE_OVERRIDE_FORKS.len()],
             state_override_fork_activations: [ForkCondition::Never; STATE_OVERRIDE_FORKS.len()],
             evm_limits_fork0: None,
@@ -452,6 +457,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         Ok(Arc::new(ConduitOpChainSpec {
             inner: op_chain_spec,
+            migration_block: extras.migration_block,
             state_override_forks,
             state_override_fork_activations,
             evm_limits_fork0,
@@ -888,6 +894,26 @@ mod tests {
             ForkCondition::Never,
         );
         assert!(spec.evm_limits_fork0.is_none());
+    }
+
+    #[test]
+    fn migration_block_is_rpc_only() {
+        let baseline = parse_spec(BASE_GENESIS);
+        for block in [None, Some(0), Some(32956469), Some(u64::MAX)] {
+            let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+            genesis["config"]["migrationBlock"] = serde_json::json!(block);
+            let spec = parse_spec(&genesis.to_string());
+            assert_eq!(spec.migration_block, block);
+            assert_eq!(spec.genesis_hash(), baseline.genesis_hash());
+            assert_eq!(spec.genesis_header(), baseline.genesis_header());
+            assert_eq!(spec.inner.hardforks, baseline.inner.hardforks);
+            assert_eq!(spec.latest_fork_id(), baseline.latest_fork_id());
+        }
+        for invalid in ["-1", "18446744073709551616", "1.5", "\"42\"", "true", "{}"] {
+            let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+            genesis["config"]["migrationBlock"] = serde_json::from_str(invalid).unwrap();
+            assert!(try_parse_spec(&genesis.to_string()).is_err(), "accepted {invalid}");
+        }
     }
 
     #[test]
