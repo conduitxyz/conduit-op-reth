@@ -1,10 +1,11 @@
 use crate::e2e::{
-    FORK_ACTIVATION_TIMESTAMP, PREFUND_BALANCE, PREFUND_BALANCE_U256, STORAGE_SLOT_1,
-    STORAGE_SLOT_2, TARGET_BYTECODE, advance, build_genesis_with_override, launch_test_node,
-    parse_chain_spec,
+    FORK_ACTIVATION_TIMESTAMP, INITIAL_PAYLOAD_TIMESTAMP, PREFUND_BALANCE, PREFUND_BALANCE_U256,
+    STORAGE_SLOT_1, STORAGE_SLOT_2, TARGET_BYTECODE, advance, build_genesis_with_override,
+    launch_test_node, op_payload_attributes, parse_chain_spec,
 };
+use alloy_consensus::{BlockHeader, TxReceipt};
 use alloy_eips::Encodable2718;
-use alloy_primitives::{Bytes, TxKind, U256, address};
+use alloy_primitives::{B256, Bytes, TxKind, U256, address};
 use alloy_rpc_types_eth::{TransactionInput, TransactionRequest, state::EvmOverrides};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
@@ -261,5 +262,174 @@ async fn test_state_override_bytecode_executable_via_eth_call() -> eyre::Result<
     let ret = OverrideTestV2::getValueCall::abi_decode_returns(&result)?;
     assert_eq!(ret, U256::from(99));
 
+    Ok(())
+}
+
+/// A transition-block transaction observes round 0, then changes its slot. The next block must
+/// preserve that write, round 1 must clear it, and archive reads must retain each block's value.
+#[tokio::test]
+async fn test_state_override_rounds_preserve_transaction_writes_and_history() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let signer: PrivateKeySigner =
+        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse()?;
+    let contract = address!("4200000000000000000000000000000000000042");
+    // SSTORE(2, SLOAD(1)); SSTORE(1, CALLDATALOAD(0)); STOP.
+    let code = "0x6001546002555f3560015500";
+    let genesis_json = build_genesis_with_override(
+        FORK_ACTIVATION_TIMESTAMP,
+        serde_json::json!({
+            format!("{contract}"): {
+                "storage": { format!("{STORAGE_SLOT_1}"): B256::with_last_byte(0xbb) }
+            }
+        }),
+        Some(serde_json::json!({
+            format!("{}", signer.address()): { "balance": PREFUND_BALANCE },
+            format!("{contract}"): {
+                "balance": "0x0", "code": code,
+                "storage": { format!("{STORAGE_SLOT_1}"): B256::with_last_byte(0xaa) }
+            }
+        })),
+    );
+    let mut genesis: serde_json::Value = serde_json::from_str(&genesis_json)?;
+    genesis["config"]["conduit"]["stateOverrideFork1"] = serde_json::json!({
+        "time": FORK_ACTIVATION_TIMESTAMP + 2,
+        "blockTimeAtFork": 1,
+        "updates": {
+            format!("{contract}"): {
+                "storage": { format!("{STORAGE_SLOT_1}"): B256::ZERO }
+            }
+        }
+    });
+    let chain_spec = parse_chain_spec(&serde_json::to_string(&genesis)?);
+    let (_tasks, mut ctx) = launch_test_node!(chain_spec.clone());
+
+    advance!(ctx);
+    assert_eq!(
+        ctx.inner.provider.latest()?.storage(contract, STORAGE_SLOT_1)?,
+        Some(U256::from(0xaa)),
+        "round 0 must not activate early",
+    );
+
+    let tx = TransactionRequest {
+        chain_id: Some(chain_spec.chain_id()),
+        nonce: Some(0),
+        to: Some(TxKind::Call(contract)),
+        gas: Some(100_000),
+        max_fee_per_gas: Some(1_000_000_000_000),
+        max_priority_fee_per_gas: Some(1_000_000_000),
+        input: TransactionInput::new(Bytes::copy_from_slice(&U256::from(0xcc).to_be_bytes::<32>())),
+        ..Default::default()
+    };
+    let signed = TransactionTestContext::sign_tx(signer, tx).await;
+    let tx_hash = ctx.rpc.inject_tx(Bytes::from(signed.encoded_2718())).await?;
+    let payload = advance!(ctx);
+    assert_eq!(payload.block().timestamp(), FORK_ACTIVATION_TIMESTAMP);
+    assert!(payload.block().body().transactions().any(|tx| *tx.tx_hash() == tx_hash));
+    let receipt = ctx.rpc.inner.eth_api().transaction_receipt(tx_hash).await?.unwrap();
+    assert!(receipt.inner.inner.status(), "transition-block transaction must succeed");
+    let state = ctx.inner.provider.latest()?;
+    assert_eq!(state.storage(contract, STORAGE_SLOT_1)?, Some(U256::from(0xcc)));
+    assert_eq!(
+        state.storage(contract, STORAGE_SLOT_2)?,
+        Some(U256::from(0xbb)),
+        "transaction must observe the override before executing",
+    );
+    drop(state);
+
+    // Block 3 preserves the transaction's write; round 1 clears it in block 4, not block 3.
+    for (block, expected) in [(3, 0xcc), (4, 0), (5, 0)] {
+        let payload = advance!(ctx);
+        assert_eq!(payload.block().timestamp(), INITIAL_PAYLOAD_TIMESTAMP + block);
+        assert_eq!(
+            ctx.inner.provider.latest()?.storage(contract, STORAGE_SLOT_1)?.unwrap_or_default(),
+            U256::from(expected),
+            "wrong slot value at block {block}",
+        );
+    }
+
+    // Read after both transitions: corrupt originals would return zero for pre-fork state or
+    // the override's value instead of the transition-block transaction's final value.
+    for (block, expected, observed) in
+        [(1, 0xaa, 0), (2, 0xcc, 0xbb), (3, 0xcc, 0xbb), (4, 0, 0xbb)]
+    {
+        let state = ctx.inner.provider.history_by_block_number(block)?;
+        assert_eq!(
+            state.storage(contract, STORAGE_SLOT_1)?.unwrap_or_default(),
+            U256::from(expected),
+            "wrong historical slot value at block {block}",
+        );
+        assert_eq!(
+            state.storage(contract, STORAGE_SLOT_2)?.unwrap_or_default(),
+            U256::from(observed),
+            "wrong historical transaction observation at block {block}",
+        );
+    }
+    Ok(())
+}
+
+/// Two distinct fork timestamps land in one 2s block. Exercise the executor's actual loop,
+/// including zero clearing and the merged revert back to the value before either round.
+#[tokio::test]
+async fn test_state_override_overlapping_rounds_follow_executor_order() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let contract = address!("4200000000000000000000000000000000000042");
+    let genesis_json = build_genesis_with_override(
+        INITIAL_PAYLOAD_TIMESTAMP + 3,
+        serde_json::json!({
+            format!("{contract}"): {
+                "storage": {
+                    format!("{STORAGE_SLOT_1}"): B256::with_last_byte(0xbb),
+                    format!("{STORAGE_SLOT_2}"): B256::with_last_byte(0xdd)
+                }
+            }
+        }),
+        Some(serde_json::json!({
+            format!("{contract}"): {
+                "balance": "0x0", "code": "0x00",
+                "storage": { format!("{STORAGE_SLOT_1}"): B256::with_last_byte(0xaa) }
+            }
+        })),
+    );
+    let mut genesis: serde_json::Value = serde_json::from_str(&genesis_json)?;
+    genesis["config"]["conduit"]["stateOverrideFork0"]["blockTimeAtFork"] = serde_json::json!(2);
+    genesis["config"]["conduit"]["stateOverrideFork1"] = serde_json::json!({
+        "time": INITIAL_PAYLOAD_TIMESTAMP + 4,
+        "blockTimeAtFork": 2,
+        "updates": {
+            format!("{contract}"): {
+                "storage": { format!("{STORAGE_SLOT_1}"): B256::ZERO }
+            }
+        }
+    });
+    let chain_spec = parse_chain_spec(&serde_json::to_string(&genesis)?);
+    let (_tasks, mut ctx) = launch_test_node!(chain_spec, |timestamp| {
+        op_payload_attributes(
+            INITIAL_PAYLOAD_TIMESTAMP + 2 * (timestamp - INITIAL_PAYLOAD_TIMESTAMP),
+        )
+    });
+
+    for (block, expected, marker) in [(1, 0xaa, 0), (2, 0, 0xdd), (3, 0, 0xdd)] {
+        let payload = advance!(ctx);
+        assert_eq!(payload.block().timestamp(), INITIAL_PAYLOAD_TIMESTAMP + 2 * block);
+        let state = ctx.inner.provider.latest()?;
+        assert_eq!(
+            state.storage(contract, STORAGE_SLOT_1)?.unwrap_or_default(),
+            U256::from(expected),
+            "round 1 must win at block {block}",
+        );
+        assert_eq!(
+            state.storage(contract, STORAGE_SLOT_2)?.unwrap_or_default(),
+            U256::from(marker),
+            "round 0 must also execute at block {block}",
+        );
+    }
+    let before = ctx.inner.provider.history_by_block_number(1)?;
+    assert_eq!(before.storage(contract, STORAGE_SLOT_1)?, Some(U256::from(0xaa)));
+    assert_eq!(before.storage(contract, STORAGE_SLOT_2)?.unwrap_or_default(), U256::ZERO);
+    let transition = ctx.inner.provider.history_by_block_number(2)?;
+    assert_eq!(transition.storage(contract, STORAGE_SLOT_1)?.unwrap_or_default(), U256::ZERO);
+    assert_eq!(transition.storage(contract, STORAGE_SLOT_2)?, Some(U256::from(0xdd)));
     Ok(())
 }
