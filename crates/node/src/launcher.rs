@@ -9,7 +9,6 @@ use crate::{
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     hardforks::{ConduitOpHardfork, ConduitOpHardforks},
-    historical_rpc::HistoricalRpcOverride,
     node::ConduitOpNode,
     slipstream::SlipstreamProxy,
 };
@@ -41,14 +40,12 @@ use tracing::{info, warn};
 /// overrides.
 pub async fn launch_node(
     builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
-    mut args: RollupArgs,
+    args: RollupArgs,
     slipstream_enabled: bool,
     historical_rpc_block: Option<u64>,
 ) -> eyre::Result<(), ErrReport> {
     validate_slipstream_config(&args, slipstream_enabled)?;
     let config = builder.config();
-    let historical_rpc =
-        HistoricalRpcOverride::take(&mut args, historical_rpc_block, config.chain.migration_block)?;
     if let Some(max_initcode_size) =
         config.chain.evm_limits_fork0.and_then(|limits| limits.max_initcode_size) &&
         max_initcode_size >= config.txpool.max_tx_input_bytes
@@ -66,16 +63,14 @@ pub async fn launch_node(
 
     if !args.proofs_history {
         let flashblocks_enabled = args.flashblocks_url.is_some();
+        let mut node = ConduitOpNode::new(args);
+        node.historical_rpc_block = historical_rpc_block;
         let handle = builder
-            .node(ConduitOpNode::new(args))
+            .node(node)
             .extend_rpc_modules(move |mut ctx| {
                 let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
                 install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
-                install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
-                if let Some(historical_rpc) = historical_rpc {
-                    historical_rpc.install(&mut ctx)?;
-                }
-                Ok(())
+                install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)
             })
             .launch_with_debug_capabilities()
             .await?;
@@ -92,7 +87,8 @@ pub async fn launch_node(
                 MdbxProofsStorage::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorage: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc).await
+            launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc_block)
+                .await
         }
         ProofsStorageVersion::V2 => {
             info!(target: "reth::cli", "Using on-disk storage for proofs history (v2)");
@@ -100,7 +96,8 @@ pub async fn launch_node(
                 MdbxProofsStorageV2::new(&path)
                     .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorageV2: {e}"))?,
             );
-            launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc).await
+            launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc_block)
+                .await
         }
     }
 }
@@ -111,7 +108,7 @@ async fn launch_with_proof_history<S>(
     args: RollupArgs,
     mdbx: Arc<S>,
     slipstream_enabled: bool,
-    historical_rpc: Option<HistoricalRpcOverride>,
+    historical_rpc_block: Option<u64>,
 ) -> eyre::Result<(), ErrReport>
 where
     S: OpProofsStore + DatabaseMetrics + Send + Sync + 'static,
@@ -123,9 +120,11 @@ where
         args.clone();
     let proofs_history_window = proofs_history_window.window;
     let flashblocks_enabled = args.flashblocks_url.is_some();
+    let mut node = ConduitOpNode::new(args);
+    node.historical_rpc_block = historical_rpc_block;
 
     let handle = builder
-        .node(ConduitOpNode::new(args))
+        .node(node)
         .on_node_started(move |node| {
             spawn_proofs_db_metrics(
                 node.task_executor,
@@ -162,9 +161,6 @@ where
                 ctx.auth_module.replace_auth_methods(auth_api_ext.into_rpc())?;
             let debug_replaced = ctx.modules.replace_configured(debug_ext.into_rpc())?;
             info!(target: "reth::cli", eth_replaced, auth_eth_replaced, debug_replaced, "Proofs-history RPC overrides installed");
-            if let Some(historical_rpc) = historical_rpc {
-                historical_rpc.install(&mut ctx)?;
-            }
             Ok(())
         })
         .launch_with_debug_capabilities()

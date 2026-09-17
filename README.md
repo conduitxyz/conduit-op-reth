@@ -59,17 +59,14 @@ With neither cutoff configured, upstream behavior is preserved, including disabl
 when Bedrock has no positive block activation. The CLI cutoff requires `--rollup.historicalrpc`;
 genesis `migrationBlock` alone does not require an endpoint or enable forwarding.
 
-Both CLI and genesis cutoffs wrap only methods already enabled on each public transport (HTTP/WS/IPC);
-forwarding does not expose disabled namespaces or alter Engine API authentication. Historical requests
-have a 30-second deadline and a shared limit of 16 in-flight requests, with excess work rejected
-without queueing. Downloads and single/batch responses respect the configured RPC size limits.
-Use a trusted historical endpoint and retain normal ingress rate limits; forwarding still creates
-backend load. These safeguards apply to CLI/genesis cutoffs, not the unchanged upstream default.
+All cutoffs use upstream op-reth historical RPC middleware unchanged, including its limitations:
+forwarding can occur before enabled-method checks, forwarded responses/batches can bypass normal
+RPC response-size limits, and no additional historical request timeout or concurrency cap is added.
+Use a trusted historical endpoint and enforce method access and resource limits at ingress.
 
 Unknown block/transaction hashes are forwarded optimistically, even with an explicit zero cutoff.
-Backend failures fall back to the original local handler. Each call makes at most one historical
-request: unlike upstream's legacy l2geth path, the override requires native `eth_getBlockReceipts`
-support rather than assembling receipts through per-transaction requests.
+Backend failures fall back to local handling. Upstream's legacy l2geth receipt fallback is retained;
+one `eth_getBlockReceipts` request can issue additional per-transaction historical requests.
 
 ## License
 
