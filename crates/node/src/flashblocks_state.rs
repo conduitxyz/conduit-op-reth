@@ -544,22 +544,16 @@ mod tests {
 
         let mut flashblock = StateOverride::default();
         flashblock.entry(ADDR).or_default().state_diff = Some(
-            [
-                (slot_a, B256::from(U256::from(10))),
-                (slot_b, B256::from(U256::from(20))),
-            ]
-            .into_iter()
-            .collect(),
+            [(slot_a, B256::from(U256::from(10))), (slot_b, B256::from(U256::from(20)))]
+                .into_iter()
+                .collect(),
         );
 
         let mut user = StateOverride::default();
         user.entry(ADDR).or_default().state_diff = Some(
-            [
-                (slot_b, B256::from(U256::from(200))),
-                (slot_c, B256::from(U256::from(30))),
-            ]
-            .into_iter()
-            .collect(),
+            [(slot_b, B256::from(U256::from(200))), (slot_c, B256::from(U256::from(30)))]
+                .into_iter()
+                .collect(),
         );
 
         let merged = merge_overrides(Some(flashblock), Some(user)).unwrap();
@@ -575,12 +569,10 @@ mod tests {
         let user_slot = B256::from(U256::from(2));
 
         let mut flashblock = StateOverride::default();
-        flashblock.entry(ADDR).or_default().state_diff = Some(
-            [(pending_slot, B256::from(U256::from(10)))].into_iter().collect(),
-        );
+        flashblock.entry(ADDR).or_default().state_diff =
+            Some([(pending_slot, B256::from(U256::from(10)))].into_iter().collect());
 
-        let user_state =
-            [(user_slot, B256::from(U256::from(20)))].into_iter().collect();
+        let user_state = [(user_slot, B256::from(U256::from(20)))].into_iter().collect();
         let mut user = StateOverride::default();
         user.entry(ADDR).or_default().state = Some(user_state);
 
