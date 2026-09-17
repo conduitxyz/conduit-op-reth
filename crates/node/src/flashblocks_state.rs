@@ -120,13 +120,10 @@ pub fn bundle_state_overrides(bundle: &BundleState) -> StateOverride {
         if info.code_hash != KECCAK_EMPTY {
             if let Some(code) = info.code.as_ref().or_else(|| bundle.contracts.get(&info.code_hash))
             {
-                // `bytes()` returns the analysis-padded bytecode, matching Base.
-                //
-                // Possible future improvement: use `code.original_bytes()` instead,
-                // which strips the trailing analysis padding so EXTCODESIZE /
-                // EXTCODEHASH / CODECOPY on pending-deployed contracts return the
-                // actual deployed code.
-                account_override.code = Some(code.bytes());
+                // StateOverride.code is interpreted as raw deployed bytecode. REVM's analyzed
+                // legacy representation includes execution padding in `bytes()`, so forward the
+                // original bytes to keep code size/hash/introspection consistent with execution.
+                account_override.code = Some(code.original_bytes());
             }
         } else if account.original_info.as_ref().is_some_and(|orig| orig.code_hash != KECCAK_EMPTY)
         {
@@ -397,14 +394,19 @@ mod tests {
     }
 
     #[test]
-    fn deployed_contract_overrides_code() {
-        let code = Bytecode::new_raw(Bytes::from_static(&[0x60, 0x00]));
+    fn deployed_contract_overrides_original_code_bytes() {
+        // A truncated PUSH guarantees REVM's analyzed representation needs execution padding,
+        // while the deployed bytecode itself is still only this single byte.
+        let raw = Bytes::from_static(&[0x60]);
+        let code = Bytecode::new_raw(raw.clone());
+        assert_ne!(code.bytes(), raw, "test bytecode should contain analysis padding");
+
         let account = BundleAccount {
             info: Some(AccountInfo {
                 balance: U256::ZERO,
                 nonce: 1,
                 code_hash: code.hash_slow(),
-                code: Some(code.clone()),
+                code: Some(code),
                 ..Default::default()
             }),
             original_info: None,
@@ -414,7 +416,7 @@ mod tests {
 
         let overrides = bundle_state_overrides(&bundle_with_account(account));
         let acc = overrides.get(&ADDR).unwrap();
-        assert_eq!(acc.code, Some(code.bytes()));
+        assert_eq!(acc.code, Some(raw));
         assert_eq!(acc.state_diff, None);
     }
 
