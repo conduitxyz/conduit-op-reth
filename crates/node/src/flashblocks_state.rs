@@ -22,7 +22,7 @@ use alloy_primitives::{B256, Bytes, U256};
 use alloy_rpc_types_eth::{
     BlockOverrides,
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
-    state::{EvmOverrides, StateOverride, StateOverridesBuilder},
+    state::{AccountOverride, EvmOverrides, StateOverride},
 };
 use jsonrpsee::{
     core::{RpcResult, async_trait},
@@ -238,17 +238,66 @@ fn merge_block_overrides(
     }
 }
 
+/// Merges one user account override on top of the pending flashblock account.
+///
+/// Scalar fields are merged independently so a partial user override does not discard
+/// unrelated pending balance, nonce or code changes. Storage keeps the RPC semantics:
+/// `state` is a full replacement, while `stateDiff` layers individual slots on top.
+fn merge_account_overrides(
+    mut flashblock: AccountOverride,
+    user: AccountOverride,
+) -> AccountOverride {
+    if user.balance.is_some() {
+        flashblock.balance = user.balance;
+    }
+    if user.nonce.is_some() {
+        flashblock.nonce = user.nonce;
+    }
+    if user.code.is_some() {
+        flashblock.code = user.code;
+    }
+    if user.move_precompile_to.is_some() {
+        flashblock.move_precompile_to = user.move_precompile_to;
+    }
+
+    if user.state.is_some() {
+        // Full user state replaces the pending storage view. Preserve stateDiff too if the
+        // request supplied both so downstream validation can reject the invalid combination.
+        flashblock.state = user.state;
+        flashblock.state_diff = user.state_diff;
+    } else if let Some(user_diff) = user.state_diff {
+        if let Some(state) = flashblock.state.as_mut() {
+            // A diff on top of a full pending state can be represented as one full state map.
+            state.extend(user_diff);
+            flashblock.state_diff = None;
+        } else {
+            flashblock.state_diff.get_or_insert_with(Default::default).extend(user_diff);
+        }
+    }
+
+    flashblock
+}
+
 /// Merges flashblock state overrides with user-supplied overrides.
 ///
-/// User overrides win per account, mirroring the behavior of Base's flashblocks RPC.
+/// User fields win without dropping unrelated fields from the pending flashblock state.
 fn merge_overrides(
     flashblock: Option<StateOverride>,
     user: Option<StateOverride>,
 ) -> Option<StateOverride> {
     match (flashblock, user) {
         (None, user) => user,
-        (Some(flashblock), user) => {
-            Some(StateOverridesBuilder::new(flashblock).extend(user.unwrap_or_default()).build())
+        (Some(flashblock), None) => Some(flashblock),
+        (Some(mut flashblock), Some(user)) => {
+            for (address, user_account) in user {
+                if let Some(flashblock_account) = flashblock.get_mut(&address) {
+                    let base = std::mem::take(flashblock_account);
+                    *flashblock_account = merge_account_overrides(base, user_account);
+                } else {
+                    flashblock.insert(address, user_account);
+                }
+            }
+            Some(flashblock)
         }
     }
 }
@@ -464,15 +513,93 @@ mod tests {
     }
 
     #[test]
-    fn user_overrides_win_per_account() {
+    fn user_overrides_merge_per_field() {
+        let slot = B256::from(U256::from(1));
+        let value = B256::from(U256::from(11));
+        let code = Bytes::from_static(&[0x60, 0x00]);
+
+        let mut flashblock = StateOverride::default();
+        let pending = flashblock.entry(ADDR).or_default();
+        pending.balance = Some(U256::from(1));
+        pending.nonce = Some(2);
+        pending.code = Some(code.clone());
+        pending.state_diff = Some([(slot, value)].into_iter().collect());
+
+        let mut user = StateOverride::default();
+        user.entry(ADDR).or_default().nonce = Some(3);
+
+        let merged = merge_overrides(Some(flashblock), Some(user)).unwrap();
+        let account = merged.get(&ADDR).unwrap();
+        assert_eq!(account.balance, Some(U256::from(1)));
+        assert_eq!(account.nonce, Some(3));
+        assert_eq!(account.code, Some(code));
+        assert_eq!(account.state_diff.as_ref().unwrap().get(&slot), Some(&value));
+    }
+
+    #[test]
+    fn user_state_diff_merges_with_pending_slots() {
+        let slot_a = B256::from(U256::from(1));
+        let slot_b = B256::from(U256::from(2));
+        let slot_c = B256::from(U256::from(3));
+
+        let mut flashblock = StateOverride::default();
+        flashblock.entry(ADDR).or_default().state_diff = Some(
+            [(slot_a, B256::from(U256::from(10))), (slot_b, B256::from(U256::from(20)))]
+                .into_iter()
+                .collect(),
+        );
+
+        let mut user = StateOverride::default();
+        user.entry(ADDR).or_default().state_diff = Some(
+            [(slot_b, B256::from(U256::from(200))), (slot_c, B256::from(U256::from(30)))]
+                .into_iter()
+                .collect(),
+        );
+
+        let merged = merge_overrides(Some(flashblock), Some(user)).unwrap();
+        let diff = merged.get(&ADDR).unwrap().state_diff.as_ref().unwrap();
+        assert_eq!(diff.get(&slot_a), Some(&B256::from(U256::from(10))));
+        assert_eq!(diff.get(&slot_b), Some(&B256::from(U256::from(200))));
+        assert_eq!(diff.get(&slot_c), Some(&B256::from(U256::from(30))));
+    }
+
+    #[test]
+    fn user_full_state_replaces_pending_state_diff() {
+        let pending_slot = B256::from(U256::from(1));
+        let user_slot = B256::from(U256::from(2));
+
+        let mut flashblock = StateOverride::default();
+        flashblock.entry(ADDR).or_default().state_diff =
+            Some([(pending_slot, B256::from(U256::from(10)))].into_iter().collect());
+
+        let user_state = [(user_slot, B256::from(U256::from(20)))].into_iter().collect();
+        let mut user = StateOverride::default();
+        user.entry(ADDR).or_default().state = Some(user_state);
+
+        let merged = merge_overrides(Some(flashblock), Some(user)).unwrap();
+        let account = merged.get(&ADDR).unwrap();
+        assert_eq!(
+            account.state.as_ref().unwrap().get(&user_slot),
+            Some(&B256::from(U256::from(20)))
+        );
+        assert_eq!(account.state.as_ref().unwrap().get(&pending_slot), None);
+        assert!(account.state_diff.is_none());
+    }
+
+    #[test]
+    fn invalid_user_storage_override_remains_invalid() {
         let mut flashblock = StateOverride::default();
         flashblock.entry(ADDR).or_default().balance = Some(U256::from(1));
 
         let mut user = StateOverride::default();
-        user.entry(ADDR).or_default().balance = Some(U256::from(2));
+        let user_account = user.entry(ADDR).or_default();
+        user_account.state = Some(Default::default());
+        user_account.state_diff = Some(Default::default());
 
         let merged = merge_overrides(Some(flashblock), Some(user)).unwrap();
-        assert_eq!(merged.get(&ADDR).unwrap().balance, Some(U256::from(2)));
+        let account = merged.get(&ADDR).unwrap();
+        assert!(account.state.is_some());
+        assert!(account.state_diff.is_some());
     }
 
     #[test]
