@@ -49,9 +49,9 @@ Supported requests for blocks below `32956469` are forwarded; the cutoff block a
 are served locally. The override also works when Bedrock activated at block zero. It does not
 change the genesis hash, hardfork activation, or peer fork ID.
 
-Alternatively, set `"migrationBlock": 32956469` in the genesis `config` object (alongside
-`bedrockBlock`, not inside `conduit`) and supply only `--rollup.historicalrpc` on the CLI.
-The cutoff precedence is CLI `--rollup.historicalrpc.block` → genesis `config.migrationBlock` →
+Alternatively, set `"migrationBlock": 32956469` in the genesis `config.conduit` object
+and supply only `--rollup.historicalrpc` on the CLI.
+The cutoff precedence is CLI `--rollup.historicalrpc.block` → genesis `config.conduit.migrationBlock` →
 upstream `bedrockBlock`. `migrationBlock` accepts an unsigned 64-bit JSON integer; omitted or
 `null` means unset, while zero is an explicit cutoff. A CLI cutoff of zero also overrides genesis.
 

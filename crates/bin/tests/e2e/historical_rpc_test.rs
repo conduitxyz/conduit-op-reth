@@ -47,7 +47,7 @@ async fn historical_rpc_cutoff() -> eyre::Result<()> {
         let mut genesis: Value = serde_json::from_str(BASE_GENESIS)?;
         genesis["config"]["bedrockBlock"] = json!(bedrock);
         if let Some(migration) = migration {
-            genesis["config"]["migrationBlock"] = json!(migration);
+            genesis["config"]["conduit"]["migrationBlock"] = json!(migration);
         }
         let chain = parse_chain_spec(&genesis.to_string());
         let genesis_hash = reth_chainspec::EthChainSpec::genesis_hash(chain.as_ref());

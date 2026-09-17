@@ -193,18 +193,17 @@ impl ConduitOpHardforks for ConduitOpChainSpec {
     }
 }
 
-/// Additional fields in genesis `config`.
+/// Top-level extra fields in genesis `config` containing the `"conduit"` key.
 #[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
 struct GenesisExtraFields {
     conduit: Option<ConduitOpGenesisConfig>,
-    migration_block: Option<u64>,
 }
 
 /// Raw JSON structure for the `"conduit"` section in genesis `config`.
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConduitOpGenesisConfig {
+    migration_block: Option<u64>,
     state_override_fork0: Option<StateOverrideForkRaw>,
     state_override_fork1: Option<StateOverrideForkRaw>,
     state_override_fork2: Option<StateOverrideForkRaw>,
@@ -335,6 +334,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             .map_err(|e| eyre::eyre!("failed to deserialize conduit config: {e}"))?;
 
         let mut conduit_config = extras.conduit.unwrap_or_default();
+        let migration_block = conduit_config.migration_block;
         let raw_evm_limits_fork0 = conduit_config.evm_limits_fork0.take();
         let raw_state_override_forks = conduit_config.state_override_forks();
 
@@ -457,7 +457,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         Ok(Arc::new(ConduitOpChainSpec {
             inner: op_chain_spec,
-            migration_block: extras.migration_block,
+            migration_block,
             state_override_forks,
             state_override_fork_activations,
             evm_limits_fork0,
@@ -880,6 +880,7 @@ mod tests {
     #[test]
     fn parse_genesis_without_conduit_config() {
         let spec = parse_spec(BASE_GENESIS);
+        assert_eq!(spec.migration_block, None);
         assert!(spec.state_override_forks().next().is_none());
         assert_eq!(
             spec.conduit_op_fork_activation(ConduitOpHardfork::StateOverrideFork0),
@@ -898,10 +899,12 @@ mod tests {
 
     #[test]
     fn migration_block_is_rpc_only() {
-        let baseline = parse_spec(BASE_GENESIS);
+        let base_genesis = with_conduit_forks(&[5000, 6000]);
+        let baseline = parse_spec(&base_genesis);
+        assert_eq!(baseline.migration_block, None);
         for block in [None, Some(0), Some(32956469), Some(u64::MAX)] {
-            let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
-            genesis["config"]["migrationBlock"] = serde_json::json!(block);
+            let mut genesis: serde_json::Value = serde_json::from_str(&base_genesis).unwrap();
+            genesis["config"]["conduit"]["migrationBlock"] = serde_json::json!(block);
             let spec = parse_spec(&genesis.to_string());
             assert_eq!(spec.migration_block, block);
             assert_eq!(spec.genesis_hash(), baseline.genesis_hash());
@@ -911,7 +914,7 @@ mod tests {
         }
         for invalid in ["-1", "18446744073709551616", "1.5", "\"42\"", "true", "{}"] {
             let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
-            genesis["config"]["migrationBlock"] = serde_json::from_str(invalid).unwrap();
+            genesis["config"]["conduit"]["migrationBlock"] = serde_json::from_str(invalid).unwrap();
             assert!(try_parse_spec(&genesis.to_string()).is_err(), "accepted {invalid}");
         }
     }
