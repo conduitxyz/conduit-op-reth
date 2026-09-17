@@ -253,6 +253,19 @@ fn merge_overrides(
     }
 }
 
+/// Applies the flashblock's pending state only to the first simulated block.
+///
+/// `eth_simulateV1` executes all requested blocks on a single mutable state, so reapplying
+/// the flashblock base to later blocks would overwrite changes produced by earlier simulated
+/// blocks. User overrides on later blocks are still forwarded unchanged.
+fn merge_simulate_state_overrides(
+    index: usize,
+    flashblock: &StateOverride,
+    user: Option<StateOverride>,
+) -> Option<StateOverride> {
+    if index == 0 { merge_overrides(Some(flashblock.clone()), user) } else { user }
+}
+
 #[async_trait]
 impl<Eth> FlashblocksCallApiServer<RpcTxReq<Eth::NetworkTypes>, RpcBlock<Eth::NetworkTypes>>
     for FlashblocksCallExt<Eth>
@@ -319,10 +332,10 @@ where
         let (block_id, flashblock_overrides, flashblock_block_overrides) =
             self.resolve_pending(block_number).await;
 
-        // Prepend the flashblock overrides to each simulated block's state overrides, and
-        // apply the pending block's environment to the *first* simulated block only —
-        // `simulate_v1` auto-increments the block number for subsequent blocks, so forcing
-        // it on every block would break the sequence.
+        // Apply the flashblock state and pending block environment to the first simulated
+        // block only. `simulate_v1` carries the resulting state forward and auto-increments
+        // the environment for subsequent blocks, so reapplying either base would break the
+        // simulated chain's continuity.
         let opts = match flashblock_overrides {
             Some(overrides) => {
                 let block_state_calls = opts
@@ -330,8 +343,11 @@ where
                     .into_iter()
                     .enumerate()
                     .map(|(i, sim_block)| {
-                        let state_overrides =
-                            merge_overrides(Some(overrides.clone()), sim_block.state_overrides);
+                        let state_overrides = merge_simulate_state_overrides(
+                            i,
+                            &overrides,
+                            sim_block.state_overrides,
+                        );
                         let block_overrides = if i == 0 {
                             merge_block_overrides(
                                 flashblock_block_overrides.clone(),
@@ -473,6 +489,23 @@ mod tests {
 
         let merged = merge_overrides(Some(flashblock), Some(user)).unwrap();
         assert_eq!(merged.get(&ADDR).unwrap().balance, Some(U256::from(2)));
+    }
+
+    #[test]
+    fn simulate_state_overrides_apply_flashblock_only_to_first_block() {
+        let mut flashblock = StateOverride::default();
+        flashblock.entry(ADDR).or_default().balance = Some(U256::from(10));
+
+        let first = merge_simulate_state_overrides(0, &flashblock, None).unwrap();
+        assert_eq!(first.get(&ADDR).unwrap().balance, Some(U256::from(10)));
+
+        let mut later_user = StateOverride::default();
+        later_user.entry(ADDR).or_default().nonce = Some(3);
+        let later = merge_simulate_state_overrides(1, &flashblock, Some(later_user)).unwrap();
+        let account = later.get(&ADDR).unwrap();
+        assert_eq!(account.balance, None, "later blocks must not reapply flashblock state");
+        assert_eq!(account.nonce, Some(3), "later user overrides are preserved");
+        assert!(merge_simulate_state_overrides(1, &flashblock, None).is_none());
     }
 
     #[test]
