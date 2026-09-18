@@ -93,7 +93,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libtss2-dev
 
       - name: Install cargo-hack
-        run: cargo install cargo-hack --locked
+        uses: taiki-e/install-action@bfcc24f157f2d0d9b3e7ac913143bdea59a88d7a # cargo-hack
 
       - name: Check each feature
         run: cargo hack check --workspace --each-feature --no-dev-deps
