@@ -4,12 +4,17 @@
 //! The G3 builder owns mailbox execution, while OP-Reth replicas use the same
 //! contract to proxy public batch requests to the active builder.
 
+use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, B256, Bytes};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
 
 /// Fully-qualified JSON-RPC name of the Slipstream batch method.
 pub const SEND_RAW_TRANSACTION_BATCH_METHOD: &str = "slipstream_sendRawTransactionBatch";
+
+/// Fully-qualified JSON-RPC name of the hint-carrying Slipstream batch method.
+pub const SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD: &str =
+    "slipstream_sendRawTransactionBatchWithHints";
 
 /// A transaction executed into a published flashblock.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -47,6 +52,19 @@ pub struct SlipstreamBatchAck {
     pub retry: Vec<SlipstreamRetryTx>,
 }
 
+/// A raw transaction paired with an advisory state-access hint computed by a
+/// forwarding node.
+///
+/// An absent hint means generation failed or ran past its best-effort budget; an
+/// empty hint is a successful result that touched nothing. Hints are advisory:
+/// they let the builder prewarm state, and cannot change execution outcomes.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SlipstreamHintedTx {
+    pub tx: Bytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<AccessList>,
+}
+
 /// Public Slipstream batch-submission API implemented by G3 rbuilder nodes.
 #[rpc(server, namespace = "slipstream")]
 pub trait SlipstreamApi {
@@ -54,11 +72,20 @@ pub trait SlipstreamApi {
     /// execution verdict per input transaction.
     #[method(name = "sendRawTransactionBatch")]
     async fn send_raw_transaction_batch(&self, txs: Vec<Bytes>) -> RpcResult<SlipstreamBatchAck>;
+
+    /// Same as [`Self::send_raw_transaction_batch`], with an advisory
+    /// state-access hint per transaction for prewarming.
+    #[method(name = "sendRawTransactionBatchWithHints")]
+    async fn send_raw_transaction_batch_with_hints(
+        &self,
+        txs: Vec<SlipstreamHintedTx>,
+    ) -> RpcResult<SlipstreamBatchAck>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_eips::eip2930::AccessListItem;
 
     #[test]
     fn batch_ack_ignores_future_wire_fields() {
@@ -83,5 +110,27 @@ mod tests {
         assert_eq!(ack.included[0].index, 0);
         assert_eq!(ack.rejected[0].error, "invalid");
         assert_eq!(ack.retry[0].reason, "mailbox-full");
+    }
+
+    #[test]
+    fn hinted_tx_hint_is_optional_on_the_wire() {
+        // Senders that predate hints omit the field entirely.
+        let unhinted: SlipstreamHintedTx = serde_json::from_str(r#"{"tx":"0x01"}"#).unwrap();
+        assert_eq!(unhinted.hint, None);
+        // And a missing hint is not serialized back, so the payload stays compact.
+        assert_eq!(serde_json::to_string(&unhinted).unwrap(), r#"{"tx":"0x01"}"#);
+    }
+
+    #[test]
+    fn hinted_tx_round_trips_an_access_list() {
+        let tx = SlipstreamHintedTx {
+            tx: Bytes::from_static(&[0x02]),
+            hint: Some(AccessList(vec![AccessListItem {
+                address: Address::with_last_byte(7),
+                storage_keys: vec![B256::with_last_byte(9)],
+            }])),
+        };
+        let encoded = serde_json::to_string(&tx).unwrap();
+        assert_eq!(serde_json::from_str::<SlipstreamHintedTx>(&encoded).unwrap(), tx);
     }
 }
