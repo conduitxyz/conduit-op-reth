@@ -41,7 +41,8 @@ use tracing::trace;
 /// on a canonical block.
 pub trait PendingFlashblockState: Send + Sync {
     /// Returns, for the current pending flashblock (or `None` when none exists):
-    /// - the canonical anchor block the state reads resolve against (block N-1),
+    /// - the canonical anchor block the state reads resolve against (the block the flashblock was
+    ///   built on, addressed by hash),
     /// - the accumulated state overrides representing the flashblock's preconfirmed state,
     /// - the block-environment overrides for the block being built (block N), so
     ///   `NUMBER`/`TIMESTAMP`/`BASEFEE`/`COINBASE`/`PREVRANDAO` match what a transaction included
@@ -65,20 +66,13 @@ where
             bundle_state_overrides(&flashblock.pending.executed_block.execution_output.state);
         let header = flashblock.pending.executed_block.recovered_block.header();
 
-        // Anchor *state* reads on the canonical parent block (N-1), matching Base's
-        // implementation. Keeping the anchor at N-1 also means `BLOCKHASH(N-1)` resolves
-        // to the parent's canonical hash.
-        //
-        // Possible future improvement: anchor on the exact block hash
-        // (`flashblock.canonical_anchor_hash`) instead, which pins the overrides to the
-        // block the flashblock was actually built on and fails closed during reorg
-        // races where two parents can share the same height.
-        let anchor_number = header.number().saturating_sub(1);
+        // Anchor state reads on the exact canonical block the flashblock was built on. Its bundle
+        // is cumulative from that block, which for a speculative build (block N+1 built while N is
+        // still pending) is the canonical ancestor rather than `number - 1`.
+        let anchor = BlockId::hash(flashblock.canonical_anchor_hash);
 
-        // ...but run the call in the *pending* block's environment (block N). Without this,
-        // the call executes in block N-1's context, so `block.number` / `block.timestamp` /
-        // basefee / coinbase / prevrandao diverge from what a transaction included in the
-        // flashblock (block N) actually sees. Build the env from the flashblock's own header.
+        // Run the call in the pending block's environment so `NUMBER`/`TIMESTAMP`/`BASEFEE`/
+        // `COINBASE`/`PREVRANDAO` match what a transaction included in the flashblock sees.
         let block_env = BlockOverrides {
             number: Some(U256::from(header.number())),
             time: Some(header.timestamp()),
@@ -89,7 +83,7 @@ where
             ..Default::default()
         };
 
-        Some((BlockId::number(anchor_number), overrides, block_env))
+        Some((anchor, overrides, block_env))
     }
 }
 
