@@ -62,47 +62,29 @@ where
         &self,
     ) -> Option<(BlockId, StateOverride, BlockOverrides)> {
         let flashblock = self.pending_flashblock().await.ok().flatten()?;
-        Some(flashblock_overrides(
-            flashblock.canonical_anchor_hash,
-            flashblock.pending.executed_block.recovered_block.header(),
-            &flashblock.pending.executed_block.execution_output.state,
-        ))
+        let overrides =
+            bundle_state_overrides(&flashblock.pending.executed_block.execution_output.state);
+        let header = flashblock.pending.executed_block.recovered_block.header();
+
+        // Anchor state reads on the exact canonical block the flashblock was built on. Its bundle
+        // is cumulative from that block, which for a speculative build (block N+1 built while N is
+        // still pending) is the canonical ancestor rather than `number - 1`.
+        let anchor = BlockId::hash(flashblock.canonical_anchor_hash);
+
+        // Run the call in the pending block's environment so `NUMBER`/`TIMESTAMP`/`BASEFEE`/
+        // `COINBASE`/`PREVRANDAO` match what a transaction included in the flashblock sees.
+        let block_env = BlockOverrides {
+            number: Some(U256::from(header.number())),
+            time: Some(header.timestamp()),
+            gas_limit: Some(header.gas_limit()),
+            coinbase: Some(header.beneficiary()),
+            random: header.mix_hash(),
+            base_fee: header.base_fee_per_gas().map(U256::from),
+            ..Default::default()
+        };
+
+        Some((anchor, overrides, block_env))
     }
-}
-
-/// Builds the `(anchor, state overrides, block overrides)` triple for a pending flashblock from
-/// the canonical block it was built on, its header and its accumulated state.
-fn flashblock_overrides<H: BlockHeader>(
-    canonical_anchor_hash: B256,
-    header: &H,
-    bundle: &BundleState,
-) -> (BlockId, StateOverride, BlockOverrides) {
-    let overrides = bundle_state_overrides(bundle);
-
-    // Anchor *state* reads on the canonical block the flashblock was built on. The
-    // flashblock's bundle is cumulative from that block: for a canonical build it is the
-    // parent (N-1); for a speculative build (flashblocks for N+1 received before block N
-    // became canonical) it is the canonical ancestor and the bundle already includes the
-    // pending parent's changes. Anchoring by hash rather than by `number - 1` is what keeps
-    // the speculative case resolvable (N is not canonical yet) and pins the overrides to the
-    // exact block during reorg races where two parents share a height.
-    let anchor = BlockId::hash(canonical_anchor_hash);
-
-    // ...but run the call in the *pending* block's environment (block N). Without this,
-    // the call executes in the anchor block's context, so `block.number` / `block.timestamp`
-    // / basefee / coinbase / prevrandao diverge from what a transaction included in the
-    // flashblock (block N) actually sees. Build the env from the flashblock's own header.
-    let block_env = BlockOverrides {
-        number: Some(U256::from(header.number())),
-        time: Some(header.timestamp()),
-        gas_limit: Some(header.gas_limit()),
-        coinbase: Some(header.beneficiary()),
-        random: header.mix_hash(),
-        base_fee: header.base_fee_per_gas().map(U256::from),
-        ..Default::default()
-    };
-
-    (anchor, overrides, block_env)
 }
 
 /// Converts a flashblock's accumulated [`BundleState`] into a [`StateOverride`] that can
@@ -491,42 +473,6 @@ mod tests {
         // `bundle_state_overrides`).
         assert_eq!(acc.state, None);
         assert_eq!(acc.state_diff, None);
-    }
-
-    #[test]
-    fn pending_overrides_anchor_on_canonical_hash_and_pending_env() {
-        use alloy_consensus::Header;
-
-        // Speculative case: the flashblock is for block 101 while block 100 is not canonical
-        // yet, so the anchor is the canonical ancestor's hash, not `number - 1`.
-        let anchor_hash = B256::repeat_byte(0x11);
-        let header = Header {
-            number: 101,
-            timestamp: 1_700_000_000,
-            gas_limit: 30_000_000,
-            beneficiary: ADDR,
-            mix_hash: B256::repeat_byte(0x22),
-            base_fee_per_gas: Some(7),
-            ..Default::default()
-        };
-        let account = BundleAccount {
-            info: Some(AccountInfo { balance: U256::from(42), ..Default::default() }),
-            original_info: None,
-            storage: Default::default(),
-            status: AccountStatus::Changed,
-        };
-
-        let (anchor, overrides, block_env) =
-            flashblock_overrides(anchor_hash, &header, &bundle_with_account(account));
-
-        assert_eq!(anchor, BlockId::hash(anchor_hash));
-        assert_eq!(overrides.get(&ADDR).unwrap().balance, Some(U256::from(42)));
-        assert_eq!(block_env.number, Some(U256::from(101)));
-        assert_eq!(block_env.time, Some(1_700_000_000));
-        assert_eq!(block_env.gas_limit, Some(30_000_000));
-        assert_eq!(block_env.coinbase, Some(ADDR));
-        assert_eq!(block_env.random, Some(B256::repeat_byte(0x22)));
-        assert_eq!(block_env.base_fee, Some(U256::from(7)));
     }
 
     #[test]
