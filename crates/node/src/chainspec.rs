@@ -12,6 +12,7 @@ use reth_optimism_chainspec::{
 };
 use reth_optimism_forks::{OpHardfork, OpHardforks};
 use reth_primitives_traits::SealedHeader;
+use revm::bytecode::Bytecode;
 use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
@@ -386,6 +387,16 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
                 return Err(eyre::eyre!("{fork} blockTimeAtFork must be greater than zero"));
             }
 
+            // The transition decodes each code with `Bytecode::new_raw`, which panics on a
+            // malformed EIP-7702 designator; reject it here rather than at the activation block.
+            for (address, account) in &raw.updates {
+                if let Some(code) = &account.code {
+                    Bytecode::new_raw_checked(code.clone()).map_err(|err| {
+                        eyre::eyre!("{fork} code for {address} is not valid bytecode: {err}")
+                    })?;
+                }
+            }
+
             state_override_fork_activations[idx] = ForkCondition::Timestamp(raw.time);
             state_override_forks[idx] =
                 Some(StateOverrideForkConfig { updates: raw.updates, block_time_at_fork });
@@ -756,6 +767,28 @@ mod tests {
                 .contains("StateOverrideFork0 blockTimeAtFork must be greater than zero"),
             "unexpected error: {err}",
         );
+    }
+
+    #[test]
+    fn state_override_rejects_malformed_eip7702_code() {
+        let designator = |address_len: usize| format!("0xef0100{}", "11".repeat(address_len));
+        let with_code = |code: String| {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_conduit_forks(&[5000])).unwrap();
+            genesis["config"]["conduit"]["stateOverrideFork0"]["updates"]["0x4200000000000000000000000000000000000042"]
+                ["code"] = serde_json::json!(code);
+            serde_json::to_string(&genesis).unwrap()
+        };
+
+        parse_spec(&with_code(designator(20)));
+        for bad in [designator(19), designator(21), format!("0xef0101{}", "11".repeat(20))] {
+            let err = try_parse_spec(&with_code(bad.clone())).map(|_| ()).unwrap_err();
+            assert!(
+                err.to_string().contains("StateOverrideFork0 code for") &&
+                    err.to_string().contains("is not valid bytecode"),
+                "{bad}: unexpected error: {err}",
+            );
+        }
     }
 
     /// Rounds must be contiguous from 0. A gap after the first round is the easy case to miss:
