@@ -430,6 +430,19 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
                 return Err(eyre::eyre!("EvmLimitsFork0 must configure at least one EVM limit"));
             }
 
+            // REVM enforces a zero limit literally rather than as "no limit": a zero
+            // `txGasLimitCap` rejects every non-deposit transaction, while the txpool treats a
+            // zero cap as disabled and keeps admitting them.
+            for (name, is_zero) in [
+                ("maxCodeSize", raw.max_code_size == Some(0)),
+                ("maxInitcodeSize", raw.max_initcode_size == Some(0)),
+                ("txGasLimitCap", raw.tx_gas_limit_cap == Some(0)),
+            ] {
+                if is_zero {
+                    return Err(eyre::eyre!("EvmLimitsFork0 {name} must be greater than zero"));
+                }
+            }
+
             if let Some(conflicting_fork) =
                 op_chain_spec.inner.hardforks.forks_iter().find_map(|(fork, condition)| {
                     (condition == ForkCondition::Timestamp(raw.time)).then(|| fork.name())
@@ -1035,6 +1048,22 @@ mod tests {
 
             let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
             assert!(err.to_string().contains("must configure at least one EVM limit"));
+        }
+    }
+
+    #[test]
+    fn evm_limits_fork_rejects_zero_limits() {
+        for field in ["maxCodeSize", "maxInitcodeSize", "txGasLimitCap"] {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
+            genesis["config"]["conduit"]["evmLimitsFork0"][field] = serde_json::json!(0);
+
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("EvmLimitsFork0 {field} must be greater than zero")),
+                "unexpected error: {err}",
+            );
         }
     }
 
