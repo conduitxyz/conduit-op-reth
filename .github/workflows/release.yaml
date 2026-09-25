@@ -56,7 +56,7 @@ jobs:
 
           tag="${VERSION#v}"
           cargo_ver=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "conduit-op-reth") | .version')
-          if [[ "$tag" != "$cargo_ver"* ]]; then
+          if [[ "$tag" != "$cargo_ver" && "$tag" != "$cargo_ver"-* ]]; then
             echo "::error::Tag v${tag} doesn't match Cargo.toml version ${cargo_ver}"
             exit 1
           fi
