@@ -31,6 +31,7 @@ use reth_optimism_trie::{
     db::{MdbxProofsStorage, MdbxProofsStorageV2},
 };
 use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
+use reth_rpc_server_types::RethRpcModule;
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -195,7 +196,8 @@ where
 
     info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
     let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
-    ctx.modules.add_or_replace_configured(ext.into_rpc())?;
+    // Only replace the methods on transports that serve the `eth` namespace.
+    ctx.modules.add_or_replace_if_module_configured(RethRpcModule::Eth, ext.into_rpc())?;
     info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
     Ok(())
 }
