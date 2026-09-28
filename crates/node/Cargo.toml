@@ -56,6 +56,10 @@ futures-util.workspace = true
 tokio.workspace = true
 jsonrpsee = { workspace = true, features = ["server", "macros", "client"] }
 
+[dev-dependencies]
+reth-consensus.workspace = true
+reth-optimism-consensus.workspace = true
+
 [features]
 asm-keccak = [
     "alloy-primitives/asm-keccak",

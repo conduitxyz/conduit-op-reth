@@ -43,6 +43,21 @@ pub struct StateOverrideForkConfig {
     pub block_time_at_fork: u64,
 }
 
+/// Boundary of a legacy chain migrated onto the OP stack (e.g. saigon, Ronin -> OP).
+///
+/// The migrated chain starts from an `init-state` import of its last legacy block. That header
+/// keeps the legacy chain's `extraData`, which is not a Holocene/Jovian encoding, and the base
+/// fee of the first OP block was chosen by the migration rather than derived from the legacy
+/// parent. So the first OP block's base fee cannot be computed from its parent and is configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LegacyMigrationConfig {
+    /// Number of the last legacy block, i.e. the imported block.
+    pub last_legacy_block: u64,
+    /// Base fee of the first OP block (`last_legacy_block + 1`).
+    pub first_block_base_fee: u64,
+}
+
 /// EVM limits to apply when EvmLimitsFork0 activates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvmLimitsFork0Config {
@@ -67,6 +82,8 @@ pub struct ConduitOpChainSpec {
     pub inner: OpChainSpec,
     /// Exclusive historical RPC cutoff from genesis; not a consensus hardfork.
     pub migration_block: Option<u64>,
+    /// Boundary of a legacy chain migrated onto the OP stack (None for native OP chains).
+    pub legacy_migration: Option<LegacyMigrationConfig>,
     /// Configuration per state override round, indexed as in [`STATE_OVERRIDE_FORKS`]
     /// (`None` where that round is not configured).
     state_override_forks: [Option<StateOverrideForkConfig>; STATE_OVERRIDE_FORKS.len()],
@@ -146,7 +163,14 @@ impl EthChainSpec for ConduitOpChainSpec {
     }
 
     fn next_block_base_fee(&self, parent: &Self::Header, target_timestamp: u64) -> Option<u64> {
-        self.inner.next_block_base_fee(parent, target_timestamp)
+        self.inner.next_block_base_fee(parent, target_timestamp).or_else(|| {
+            // Once Holocene is active the parent's EIP-1559 parameters come from its `extraData`.
+            // The last legacy block of a migrated chain was never an OP block, so upstream yields
+            // no base fee for its child. Only for that configured parent, use the configured base
+            // fee of the first OP block.
+            let migration = self.legacy_migration?;
+            (migration.last_legacy_block == parent.number).then_some(migration.first_block_base_fee)
+        })
     }
 }
 
@@ -204,6 +228,7 @@ struct GenesisExtraFields {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConduitOpGenesisConfig {
     migration_block: Option<u64>,
+    legacy_migration: Option<LegacyMigrationConfig>,
     state_override_fork0: Option<StateOverrideForkRaw>,
     state_override_fork1: Option<StateOverrideForkRaw>,
     state_override_fork2: Option<StateOverrideForkRaw>,
@@ -305,6 +330,7 @@ impl From<OpChainSpec> for ConduitOpChainSpec {
         Self {
             inner,
             migration_block: None,
+            legacy_migration: None,
             state_override_forks: [const { None }; STATE_OVERRIDE_FORKS.len()],
             state_override_fork_activations: [ForkCondition::Never; STATE_OVERRIDE_FORKS.len()],
             evm_limits_fork0: None,
@@ -335,6 +361,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         let mut conduit_config = extras.conduit.unwrap_or_default();
         let migration_block = conduit_config.migration_block;
+        let legacy_migration = conduit_config.legacy_migration;
         let raw_evm_limits_fork0 = conduit_config.evm_limits_fork0.take();
         let raw_state_override_forks = conduit_config.state_override_forks();
 
@@ -348,6 +375,13 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
         }
 
         let chain_id = op_chain_spec.inner.genesis.config.chain_id;
+        if let Some(migration) = legacy_migration {
+            eprintln!(
+                "Legacy migration for chain ID {chain_id}: last legacy block {}, first OP block \
+                 base fee {}",
+                migration.last_legacy_block, migration.first_block_base_fee
+            );
+        }
         let excludes_early_rounds = exclude_state_override_from_fork_id(&op_chain_spec);
         let mut state_override_forks = [const { None }; STATE_OVERRIDE_FORKS.len()];
         let mut state_override_fork_activations =
@@ -458,6 +492,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
         Ok(Arc::new(ConduitOpChainSpec {
             inner: op_chain_spec,
             migration_block,
+            legacy_migration,
             state_override_forks,
             state_override_fork_activations,
             evm_limits_fork0,
@@ -1204,5 +1239,238 @@ mod tests {
             "StateOverrideFork0 should be configured from the saigon genesis conduit section",
         );
         assert_eq!(config.updates.len(), 1);
+    }
+
+    mod legacy_migration_boundary {
+        //! The saigon (Ronin -> OP) migration boundary, with the real header values. Its genesis
+        //! activates every OP fork at timestamp 0, so the first OP block's parent (the imported
+        //! last Ronin block, `extraData` = 32 zero bytes) is decoded as a Jovian header and fails.
+        use super::*;
+        use alloy_eips::{calc_next_block_base_fee, eip1559::BaseFeeParams};
+        use alloy_primitives::{B64, hex};
+        use op_alloy_consensus::encode_jovian_extra_data;
+        use reth_consensus::{ConsensusError, HeaderValidator};
+        use reth_optimism_consensus::OpBeaconConsensus;
+
+        /// Saigon block 45,528,550, the last Ronin block.
+        const LAST_LEGACY_BLOCK: u64 = 45_528_550;
+        const PARENT_BASE_FEE: u64 = 0x3a35294400;
+        const PARENT_GAS_USED: u64 = 319_087;
+        const PARENT_GAS_LIMIT: u64 = 30_029_295;
+        const PARENT_TIMESTAMP: u64 = 1_770_338_862;
+        /// Saigon block 45,528,551, the first OP block: Jovian v1, denominator 250, elasticity 6,
+        /// minimum base fee 1 gwei, base fee 0.
+        const CHILD_EXTRA_DATA: [u8; 17] = hex!("01000000fa00000006000000003b9aca00");
+        const CHILD_BASE_FEE: u64 = 0;
+
+        /// The saigon genesis fork and EIP-1559 configuration, with `conduit` set as given.
+        fn saigon_genesis(conduit: Option<serde_json::Value>) -> String {
+            let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+            let config = &mut genesis["config"];
+            config["chainId"] = serde_json::json!(202601);
+            for fork in ["pragueTime", "holoceneTime", "isthmusTime", "jovianTime"] {
+                config[fork] = serde_json::json!(0);
+            }
+            config["optimism"] = serde_json::json!({
+                "eip1559Elasticity": 6,
+                "eip1559Denominator": 50,
+                "eip1559DenominatorCanyon": 250
+            });
+            if let Some(conduit) = conduit {
+                config["conduit"] = conduit;
+            }
+            serde_json::to_string(&genesis).unwrap()
+        }
+
+        fn migration_json(last_legacy_block: u64, first_block_base_fee: u64) -> serde_json::Value {
+            serde_json::json!({
+                "legacyMigration": {
+                    "lastLegacyBlock": last_legacy_block,
+                    "firstBlockBaseFee": first_block_base_fee
+                }
+            })
+        }
+
+        fn saigon_spec() -> Arc<ConduitOpChainSpec> {
+            parse_spec(&saigon_genesis(Some(migration_json(LAST_LEGACY_BLOCK, CHILD_BASE_FEE))))
+        }
+
+        fn legacy_parent() -> SealedHeader {
+            SealedHeader::seal_slow(Header {
+                number: LAST_LEGACY_BLOCK,
+                timestamp: PARENT_TIMESTAMP,
+                extra_data: Bytes::from(vec![0u8; 32]),
+                base_fee_per_gas: Some(PARENT_BASE_FEE),
+                gas_limit: PARENT_GAS_LIMIT,
+                gas_used: PARENT_GAS_USED,
+                ..Default::default()
+            })
+        }
+
+        /// The first OP block on top of `parent` with the given base fee. Only the fields the
+        /// header-against-parent checks read are modeled; the child's timestamp is not needed
+        /// beyond being after the parent's.
+        fn op_child(parent: &SealedHeader, base_fee: u64) -> SealedHeader {
+            SealedHeader::seal_slow(Header {
+                number: parent.number + 1,
+                parent_hash: parent.hash(),
+                timestamp: parent.timestamp + 1,
+                extra_data: Bytes::from_static(&CHILD_EXTRA_DATA),
+                base_fee_per_gas: Some(base_fee),
+                gas_limit: PARENT_GAS_LIMIT,
+                blob_gas_used: Some(0),
+                excess_blob_gas: Some(0),
+                ..Default::default()
+            })
+        }
+
+        fn validate(
+            spec: Arc<ConduitOpChainSpec>,
+            child: &SealedHeader,
+            parent: &SealedHeader,
+        ) -> Result<(), ConsensusError> {
+            OpBeaconConsensus::new(spec).validate_header_against_parent(child, parent)
+        }
+
+        fn assert_base_fee_diff(result: Result<(), ConsensusError>, got: u64, expected: u64) {
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConsensusError::BaseFeeDiff(diff))
+                        if diff.got == got && diff.expected == expected
+                ),
+                "{result:?}"
+            );
+        }
+
+        #[test]
+        fn parse_legacy_migration_is_not_a_fork() {
+            let baseline = parse_spec(&saigon_genesis(None));
+            assert_eq!(baseline.legacy_migration, None);
+            let spec = saigon_spec();
+            assert_eq!(
+                spec.legacy_migration,
+                Some(LegacyMigrationConfig {
+                    last_legacy_block: LAST_LEGACY_BLOCK,
+                    first_block_base_fee: CHILD_BASE_FEE,
+                })
+            );
+            assert_eq!(spec.migration_block, None);
+            assert_eq!(spec.genesis_hash(), baseline.genesis_hash());
+            assert_eq!(spec.inner.hardforks, baseline.inner.hardforks);
+            assert_eq!(spec.latest_fork_id(), baseline.latest_fork_id());
+
+            let invalid = [
+                serde_json::json!({ "legacyMigration": 45528550 }),
+                serde_json::json!({ "legacyMigration": {} }),
+                serde_json::json!({ "legacyMigration": { "lastLegacyBlock": 1 } }),
+                serde_json::json!({ "legacyMigration": { "firstBlockBaseFee": 0 } }),
+                serde_json::json!({ "legacyMigration": {
+                    "lastLegacyBlock": 1, "firstBlockBaseFee": 0, "extra": 1
+                } }),
+                serde_json::json!({ "legacyMigration": {
+                    "lastLegacyBlock": -1, "firstBlockBaseFee": 0
+                } }),
+                serde_json::json!({ "legacyMigration": {
+                    "lastLegacyBlock": 1, "firstBlockBaseFee": "0"
+                } }),
+                serde_json::json!({ "lastLegacyBlock": 45528550 }),
+            ];
+            for conduit in invalid {
+                assert!(
+                    try_parse_spec(&saigon_genesis(Some(conduit.clone()))).is_err(),
+                    "accepted {conduit}"
+                );
+            }
+        }
+
+        #[test]
+        fn first_op_block_accepted_with_config() {
+            let parent = legacy_parent();
+            let child = op_child(&parent, CHILD_BASE_FEE);
+            let spec = saigon_spec();
+            assert_eq!(spec.next_block_base_fee(&parent, child.timestamp), Some(CHILD_BASE_FEE));
+            validate(spec, &child, &parent).unwrap();
+        }
+
+        /// Without the config this is the incident: no expected base fee can be derived.
+        #[test]
+        fn first_op_block_rejected_without_config() {
+            let parent = legacy_parent();
+            let child = op_child(&parent, CHILD_BASE_FEE);
+            let result = validate(parse_spec(&saigon_genesis(None)), &child, &parent);
+            assert!(matches!(result, Err(ConsensusError::BaseFeeMissing)), "{result:?}");
+        }
+
+        #[test]
+        fn first_op_block_with_other_base_fee_rejected() {
+            let parent = legacy_parent();
+            // Computing from the parent with the chain config parameters gives a different value
+            // from the real one, which is why the base fee is configured rather than derived.
+            let computed = calc_next_block_base_fee(
+                PARENT_GAS_USED,
+                PARENT_GAS_LIMIT,
+                PARENT_BASE_FEE,
+                BaseFeeParams::new(250, 6),
+            );
+            assert_eq!(computed, 249_063_755_150);
+            for base_fee in [1, computed] {
+                let result = validate(saigon_spec(), &op_child(&parent, base_fee), &parent);
+                assert_base_fee_diff(result, base_fee, CHILD_BASE_FEE);
+            }
+        }
+
+        /// The configured base fee only applies to the child of the configured block.
+        #[test]
+        fn config_only_applies_at_configured_block() {
+            for configured in [LAST_LEGACY_BLOCK - 1, LAST_LEGACY_BLOCK + 1, 0] {
+                let spec = parse_spec(&saigon_genesis(Some(migration_json(configured, 0))));
+                let parent = legacy_parent();
+                let result = validate(spec, &op_child(&parent, CHILD_BASE_FEE), &parent);
+                assert!(
+                    matches!(result, Err(ConsensusError::BaseFeeMissing)),
+                    "configured {configured}: {result:?}"
+                );
+            }
+        }
+
+        /// If the configured parent's `extraData` decodes, the upstream result wins.
+        #[test]
+        fn decodable_parent_at_configured_block_uses_upstream() {
+            let min_base_fee = PARENT_BASE_FEE * 2;
+            let parent = SealedHeader::seal_slow(Header {
+                extra_data: encode_jovian_extra_data(
+                    B64::ZERO,
+                    BaseFeeParams::new(250, 6),
+                    min_base_fee,
+                )
+                .unwrap(),
+                blob_gas_used: Some(0),
+                ..legacy_parent().unseal()
+            });
+            let spec = saigon_spec();
+            assert_eq!(spec.next_block_base_fee(&parent, parent.timestamp + 1), Some(min_base_fee));
+            validate(spec.clone(), &op_child(&parent, min_base_fee), &parent).unwrap();
+            let result = validate(spec, &op_child(&parent, CHILD_BASE_FEE), &parent);
+            assert_base_fee_diff(result, CHILD_BASE_FEE, min_base_fee);
+        }
+
+        /// A chain without the config computes base fees exactly as upstream `OpChainSpec`.
+        #[test]
+        fn chain_without_config_matches_upstream() {
+            let spec = parse_spec(&saigon_genesis(None));
+            let op_parent = SealedHeader::seal_slow(Header {
+                extra_data: Bytes::from_static(&CHILD_EXTRA_DATA),
+                blob_gas_used: Some(0),
+                ..legacy_parent().unseal()
+            });
+            for parent in [legacy_parent(), op_parent] {
+                let timestamp = parent.timestamp + 1;
+                assert_eq!(
+                    spec.next_block_base_fee(&parent, timestamp),
+                    spec.inner.next_block_base_fee(&parent, timestamp)
+                );
+            }
+        }
     }
 }
