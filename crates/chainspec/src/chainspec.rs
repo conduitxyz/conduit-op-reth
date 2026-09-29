@@ -1120,21 +1120,52 @@ mod tests {
     }
 
     #[test]
-    fn networking_constructor_preserves_header_and_fork_id_exclusions() {
-        let mut chain: serde_json::Value =
-            serde_json::from_str(&with_conduit_forks_for_chain(901, &[5000, 6000, 7000])).unwrap();
-        let config = chain["config"].take();
-        let header =
-            Header { extra_data: Bytes::from_static(b"canonical-genesis"), ..Default::default() };
+    fn networking_constructor_matches_full_genesis_chain_identity_and_fork_ids() {
+        for chain_id in [901, 957, 99999] {
+            let mut genesis: serde_json::Value = serde_json::from_str(
+                &with_conduit_forks_for_chain(chain_id, &[5000, 6000, 7000]),
+            )
+            .unwrap();
+            genesis["alloc"] = serde_json::json!({
+                "0x4200000000000000000000000000000000000042": { "balance": "0x1" }
+            });
+            let expected = parse_spec(&genesis.to_string());
+            let config = genesis["config"].take();
+            let header = expected.genesis_header().clone();
 
-        let spec =
-            ConduitOpChainSpec::from_chain_config_for_networking(config, header.clone()).unwrap();
-        assert_eq!(spec.genesis_header(), &header);
+            let actual =
+                ConduitOpChainSpec::from_chain_config_for_networking(config, header.clone()).unwrap();
 
-        let names: Vec<&str> = spec.forks_iter().map(|(fork, _)| fork.name()).collect();
-        assert!(!names.contains(&"StateOverrideFork0"));
-        assert!(!names.contains(&"StateOverrideFork1"));
-        assert!(names.contains(&"StateOverrideFork2"));
+            assert_eq!(actual.chain().id(), chain_id);
+            assert_eq!(actual.genesis_header(), &header);
+            assert_eq!(actual.genesis_hash(), expected.genesis_hash());
+            for timestamp in [0, 4999, 5000, 5999, 6000, 6999, 7000] {
+                assert_eq!(
+                    actual.fork_id(&head_at(timestamp)),
+                    expected.fork_id(&head_at(timestamp)),
+                    "fork ID mismatch for chain {chain_id} at timestamp {timestamp}",
+                );
+            }
+
+            let ids: Vec<ForkId> = [4999, 5000, 6000, 7000]
+                .into_iter()
+                .map(|timestamp| actual.fork_id(&head_at(timestamp)))
+                .collect();
+            let expected_next = if chain_id == 99999 {
+                [5000, 6000, 7000, 0]
+            } else {
+                [7000, 7000, 7000, 0]
+            };
+            assert_eq!(ids.iter().map(|id| id.next).collect::<Vec<_>>(), expected_next);
+
+            if chain_id == 99999 {
+                assert!(ids.windows(2).all(|pair| pair[0].hash != pair[1].hash));
+            } else {
+                assert_eq!(ids[0].hash, ids[1].hash);
+                assert_eq!(ids[1].hash, ids[2].hash);
+                assert_ne!(ids[2].hash, ids[3].hash);
+            }
+        }
     }
 
     #[test]
