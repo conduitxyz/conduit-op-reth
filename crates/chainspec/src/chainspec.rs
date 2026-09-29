@@ -1122,10 +1122,9 @@ mod tests {
     #[test]
     fn networking_constructor_matches_full_genesis_chain_identity_and_fork_ids() {
         for chain_id in [901, 957, 99999] {
-            let mut genesis: serde_json::Value = serde_json::from_str(
-                &with_conduit_forks_for_chain(chain_id, &[5000, 6000, 7000]),
-            )
-            .unwrap();
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_conduit_forks_for_chain(chain_id, &[5000, 6000, 7000]))
+                    .unwrap();
             genesis["alloc"] = serde_json::json!({
                 "0x4200000000000000000000000000000000000042": { "balance": "0x1" }
             });
@@ -1134,7 +1133,8 @@ mod tests {
             let header = expected.genesis_header().clone();
 
             let actual =
-                ConduitOpChainSpec::from_chain_config_for_networking(config, header.clone()).unwrap();
+                ConduitOpChainSpec::from_chain_config_for_networking(config, header.clone())
+                    .unwrap();
 
             assert_eq!(actual.chain().id(), chain_id);
             assert_eq!(actual.genesis_header(), &header);
@@ -1151,11 +1151,8 @@ mod tests {
                 .into_iter()
                 .map(|timestamp| actual.fork_id(&head_at(timestamp)))
                 .collect();
-            let expected_next = if chain_id == 99999 {
-                [5000, 6000, 7000, 0]
-            } else {
-                [7000, 7000, 7000, 0]
-            };
+            let expected_next =
+                if chain_id == 99999 { [5000, 6000, 7000, 0] } else { [7000, 7000, 7000, 0] };
             assert_eq!(ids.iter().map(|id| id.next).collect::<Vec<_>>(), expected_next);
 
             if chain_id == 99999 {
