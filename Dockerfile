@@ -71,8 +71,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     set -eux; \
     cargo fetch --locked; \
-    optimism_checkout="$CARGO_HOME/git/checkouts/optimism-852bcbde357560e3/b60a1a6"; \
-    test "$(git -C "$optimism_checkout" rev-parse HEAD)" = "b60a1a6398209ccc47267e77deb6e4bf4c1ede8a"; \
+    optimism_checkout="$CARGO_HOME/git/checkouts/optimism-852bcbde357560e3/52aff8e"; \
+    test "$(git -C "$optimism_checkout" rev-parse HEAD)" = "52aff8e968c5ecd319752304d29b96e7402f6727"; \
     test "$(git -C "$optimism_checkout/superchain-registry" rev-parse HEAD)" = "08d6a44910d75e28a5ee1c7c047d3bdd0bbdbdd2"; \
     OP_RETH_SYNC_SUPERCHAIN=0 cargo build --locked --profile $BUILD_PROFILE --features="$FEATURES" --package=conduit-op-reth
 

@@ -116,7 +116,7 @@ fn test_node_config(chain_spec: Arc<ConduitOpChainSpec>) -> NodeConfig<ConduitOp
         .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
 
     c.engine.persistence_threshold = 0;
-    c.engine.memory_block_buffer_target = 0;
+    c.engine.memory_block_buffer_target = Some(0);
     c.engine.prewarming_disabled = true;
     // Keep execution caching enabled, but match reth's 1 MiB unit-test budget rather than
     // its 4096 MiB production default, which exhausts CI memory across sequential nodes.
