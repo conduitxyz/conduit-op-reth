@@ -474,6 +474,7 @@ impl ConduitOpChainSpec {
     ///
     /// The genesis allocation is unavailable over these RPCs and remains empty.
     /// Do not use the result to initialize chain state.
+    #[allow(clippy::needless_update)]
     pub fn from_chain_config_for_networking(
         chain_config: serde_json::Value,
         genesis_header: Header,
@@ -492,9 +493,10 @@ impl ConduitOpChainSpec {
             base_fee_per_gas: genesis_header.base_fee_per_gas.map(u128::from),
             excess_blob_gas: genesis_header.excess_blob_gas,
             blob_gas_used: genesis_header.blob_gas_used,
-            slot_number: genesis_header.slot_number,
             number: Some(genesis_header.number),
             parent_hash: Some(genesis_header.parent_hash),
+            // Supports compatible alloy-genesis versions with fewer fields.
+            ..Default::default()
         };
         let mut spec = Self::from_genesis(genesis)?;
         spec.inner.inner.genesis_header = SealedHeader::seal_slow(genesis_header);
@@ -1122,16 +1124,12 @@ mod tests {
         let mut chain: serde_json::Value =
             serde_json::from_str(&with_conduit_forks_for_chain(901, &[5000, 6000, 7000])).unwrap();
         let config = chain["config"].take();
-        let header = Header {
-            extra_data: Bytes::from_static(b"canonical-genesis"),
-            slot_number: Some(42),
-            ..Default::default()
-        };
+        let header =
+            Header { extra_data: Bytes::from_static(b"canonical-genesis"), ..Default::default() };
 
         let spec =
             ConduitOpChainSpec::from_chain_config_for_networking(config, header.clone()).unwrap();
         assert_eq!(spec.genesis_header(), &header);
-        assert_eq!(spec.genesis().slot_number, Some(42));
 
         let names: Vec<&str> = spec.forks_iter().map(|(fork, _)| fork.name()).collect();
         assert!(!names.contains(&"StateOverrideFork0"));
