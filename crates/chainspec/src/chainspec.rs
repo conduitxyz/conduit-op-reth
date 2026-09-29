@@ -1,5 +1,3 @@
-//! Conduit OP chain specification parsing and compatibility behavior.
-
 use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks, STATE_OVERRIDE_FORKS};
 use alloy_consensus::Header;
 use alloy_genesis::{ChainConfig, Genesis};
@@ -332,7 +330,7 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 }
 
 impl ConduitOpChainSpec {
-    /// Builds a Conduit OP chain specification from genesis data.
+    /// Builds a chain specification from genesis data.
     pub fn from_genesis(genesis: Genesis) -> eyre::Result<Self> {
         // Extract conduit config from extra_fields before converting to OpChainSpec.
         let extras: GenesisExtraFields = genesis
@@ -472,13 +470,12 @@ impl ConduitOpChainSpec {
         })
     }
 
-    /// Builds a chain specification from `debug_chainConfig` and the canonical
-    /// block-zero header served by the same chain.
+    /// Builds a networking-only spec from `debug_chainConfig` and block zero.
     ///
-    /// The supplied header is retained verbatim. This keeps the genesis hash
-    /// correct for chains whose current fork schedule would derive a different
-    /// block-zero shape than the one originally sealed.
-    pub fn from_chain_config(
+    /// The genesis allocation is unavailable over these RPCs and remains empty.
+    /// Do not use the result to initialize chain state.
+    #[allow(clippy::needless_update)]
+    pub fn from_chain_config_for_networking(
         chain_config: serde_json::Value,
         genesis_header: Header,
     ) -> eyre::Result<Self> {
@@ -498,6 +495,7 @@ impl ConduitOpChainSpec {
             blob_gas_used: genesis_header.blob_gas_used,
             number: Some(genesis_header.number),
             parent_hash: Some(genesis_header.parent_hash),
+            // Supports compatible alloy-genesis versions with fewer fields.
             ..Default::default()
         };
         let mut spec = Self::from_genesis(genesis)?;
@@ -1122,14 +1120,15 @@ mod tests {
     }
 
     #[test]
-    fn chain_config_constructor_preserves_header_and_fork_id_exclusions() {
+    fn networking_constructor_preserves_header_and_fork_id_exclusions() {
         let mut chain: serde_json::Value =
             serde_json::from_str(&with_conduit_forks_for_chain(901, &[5000, 6000, 7000])).unwrap();
         let config = chain["config"].take();
         let header =
             Header { extra_data: Bytes::from_static(b"canonical-genesis"), ..Default::default() };
 
-        let spec = ConduitOpChainSpec::from_chain_config(config, header.clone()).unwrap();
+        let spec =
+            ConduitOpChainSpec::from_chain_config_for_networking(config, header.clone()).unwrap();
         assert_eq!(spec.genesis_header(), &header);
 
         let names: Vec<&str> = spec.forks_iter().map(|(fork, _)| fork.name()).collect();

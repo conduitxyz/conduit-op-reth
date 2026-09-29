@@ -1,4 +1,4 @@
-//! Conduit OP chain specifications and custom hardfork definitions.
+//! Conduit OP chain specs and hardforks.
 
 pub mod chainspec;
 pub mod hardforks;
