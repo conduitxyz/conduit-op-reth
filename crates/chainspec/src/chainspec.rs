@@ -498,7 +498,7 @@ impl ConduitOpChainSpec {
             blob_gas_used: genesis_header.blob_gas_used,
             number: Some(genesis_header.number),
             parent_hash: Some(genesis_header.parent_hash),
-            slot_number: None,
+            ..Default::default()
         };
         let mut spec = Self::from_genesis(genesis)?;
         spec.inner.inner.genesis_header = SealedHeader::seal_slow(genesis_header);
