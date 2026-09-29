@@ -53,7 +53,7 @@ reth-optimism-txpool = { git = "https://github.com/ethereum-optimism/optimism", 
 
 # Alloy
 alloy-primitives = "1.6.0"
-alloy-genesis = "2.1.1"
+alloy-genesis = "2.4.1"
 alloy-consensus = "2.1.1"
 alloy-evm = "0.37.0"
 alloy-op-evm = "0.32.0"
