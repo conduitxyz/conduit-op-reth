@@ -1,6 +1,8 @@
+//! Conduit OP chain specification parsing and compatibility behavior.
+
 use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks, STATE_OVERRIDE_FORKS};
 use alloy_consensus::Header;
-use alloy_genesis::Genesis;
+use alloy_genesis::{ChainConfig, Genesis};
 use alloy_primitives::{Address, B256, Bytes};
 use reth_chainspec::{
     Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
@@ -325,7 +327,13 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         // Parse genesis JSON.
         let genesis: Genesis = parse_genesis(s)?;
+        Ok(Arc::new(ConduitOpChainSpec::from_genesis(genesis)?))
+    }
+}
 
+impl ConduitOpChainSpec {
+    /// Builds a Conduit OP chain specification from genesis data.
+    pub fn from_genesis(genesis: Genesis) -> eyre::Result<Self> {
         // Extract conduit config from extra_fields before converting to OpChainSpec.
         let extras: GenesisExtraFields = genesis
             .config
@@ -455,13 +463,46 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             None
         };
 
-        Ok(Arc::new(ConduitOpChainSpec {
+        Ok(Self {
             inner: op_chain_spec,
             migration_block,
             state_override_forks,
             state_override_fork_activations,
             evm_limits_fork0,
-        }))
+        })
+    }
+
+    /// Builds a chain specification from `debug_chainConfig` and the canonical
+    /// block-zero header served by the same chain.
+    ///
+    /// The supplied header is retained verbatim. This keeps the genesis hash
+    /// correct for chains whose current fork schedule would derive a different
+    /// block-zero shape than the one originally sealed.
+    pub fn from_chain_config(
+        chain_config: serde_json::Value,
+        genesis_header: Header,
+    ) -> eyre::Result<Self> {
+        let config: ChainConfig = serde_json::from_value(chain_config)?;
+        let genesis = Genesis {
+            config,
+            nonce: u64::from_be_bytes(genesis_header.nonce.0),
+            timestamp: genesis_header.timestamp,
+            extra_data: genesis_header.extra_data.clone(),
+            gas_limit: genesis_header.gas_limit,
+            difficulty: genesis_header.difficulty,
+            mix_hash: genesis_header.mix_hash,
+            coinbase: genesis_header.beneficiary,
+            alloc: Default::default(),
+            base_fee_per_gas: genesis_header.base_fee_per_gas.map(u128::from),
+            excess_blob_gas: genesis_header.excess_blob_gas,
+            blob_gas_used: genesis_header.blob_gas_used,
+            number: Some(genesis_header.number),
+            parent_hash: Some(genesis_header.parent_hash),
+            slot_number: None,
+        };
+        let mut spec = Self::from_genesis(genesis)?;
+        spec.inner.inner.genesis_header = SealedHeader::seal_slow(genesis_header);
+        Ok(spec)
     }
 }
 
@@ -1078,6 +1119,23 @@ mod tests {
             ForkCondition::Timestamp(0),
         );
         assert!(spec.genesis_header().withdrawals_root.is_some());
+    }
+
+    #[test]
+    fn chain_config_constructor_preserves_header_and_fork_id_exclusions() {
+        let mut chain: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks_for_chain(901, &[5000, 6000, 7000])).unwrap();
+        let config = chain["config"].take();
+        let header =
+            Header { extra_data: Bytes::from_static(b"canonical-genesis"), ..Default::default() };
+
+        let spec = ConduitOpChainSpec::from_chain_config(config, header.clone()).unwrap();
+        assert_eq!(spec.genesis_header(), &header);
+
+        let names: Vec<&str> = spec.forks_iter().map(|(fork, _)| fork.name()).collect();
+        assert!(!names.contains(&"StateOverrideFork0"));
+        assert!(!names.contains(&"StateOverrideFork1"));
+        assert!(names.contains(&"StateOverrideFork2"));
     }
 
     #[test]

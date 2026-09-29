@@ -1,0 +1,23 @@
+[package]
+name = "conduit-op-reth-chainspec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-genesis.workspace = true
+alloy-primitives.workspace = true
+reth-chainspec.workspace = true
+reth-cli.workspace = true
+reth-network-peers.workspace = true
+reth-optimism-chainspec = { workspace = true, features = ["reth-codec", "superchain-configs"] }
+reth-optimism-forks.workspace = true
+reth-primitives-traits.workspace = true
+
+eyre.workspace = true
+serde.workspace = true
+serde_json.workspace = true

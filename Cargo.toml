@@ -11,6 +11,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 # Internal
+conduit-op-reth-chainspec = { path = "crates/chainspec" }
 conduit-op-reth-node = { path = "crates/node" }
 conduit-op-reth-rpc-api = { path = "crates/rpc-api" }
 

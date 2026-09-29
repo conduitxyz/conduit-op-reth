@@ -32,8 +32,8 @@ hardfork!(
 /// The state override hardforks, in activation order.
 ///
 /// A network schedules one entry per round of overrides; each carries its own genesis
-/// configuration and activation timestamp, and all of them share the same transition logic in
-/// [`state_override`](crate::state_override). Adding a further round means adding a variant to
+/// configuration and activation timestamp, and all of them share the same transition logic.
+/// Adding a further round means adding a variant to
 /// [`ConduitOpHardfork`], appending it here, extending
 /// [`ConduitOpHardfork::state_override_index`], and adding the matching genesis key.
 pub const STATE_OVERRIDE_FORKS: [ConduitOpHardfork; 10] = [
