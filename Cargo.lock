@@ -2350,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "conduit-op-reth"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -2404,7 +2404,7 @@ dependencies = [
 
 [[package]]
 name = "conduit-op-reth-chainspec"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "conduit-op-reth-node"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -2470,7 +2470,7 @@ dependencies = [
 
 [[package]]
 name = "conduit-op-reth-rpc-api"
-version = "2.3.0"
+version = "2.3.1"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
