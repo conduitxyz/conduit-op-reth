@@ -15,7 +15,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   # Only check version tags
   if [[ "$local_ref" =~ ^refs/tags/v ]]; then
     tag="${local_ref#refs/tags/v}"
-    if [[ "$tag" != "$cargo_ver"* ]]; then
+    if [[ "$tag" != "$cargo_ver" && "$tag" != "$cargo_ver"-* ]]; then
       echo "error: tag v${tag} doesn't match Cargo.toml version ${cargo_ver}"
       echo "hint: update the version in Cargo.toml or use the correct tag"
       exit 1
