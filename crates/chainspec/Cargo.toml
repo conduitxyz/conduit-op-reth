@@ -17,6 +17,7 @@ reth-network-peers.workspace = true
 reth-optimism-chainspec = { workspace = true, features = ["reth-codec", "superchain-configs"] }
 reth-optimism-forks.workspace = true
 reth-primitives-traits.workspace = true
+revm.workspace = true
 
 eyre.workspace = true
 serde.workspace = true
