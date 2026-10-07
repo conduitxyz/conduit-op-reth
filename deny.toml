@@ -11,6 +11,7 @@ feature-depth = 1
 
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
+yanked = "deny"
 ignore = [
   { id = "RUSTSEC-2024-0436", reason = "paste crate is unmaintained but widely used, no safe upgrade available" },
   { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained but used transitively by reth, no safe upgrade available" },
@@ -23,7 +24,6 @@ ignore = [
 allow = [
   "MIT",
   "Apache-2.0",
-  "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
@@ -38,9 +38,8 @@ allow = [
 confidence-threshold = 0.8
 exceptions = []
 
-# TODO: remove once this project has a license — also remove `publish = false` from workspace and crate Cargo.tomls
 [licenses.private]
-ignore = true
+ignore = false
 registries = []
 
 # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
@@ -57,8 +56,8 @@ skip-tree = []
 
 # https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
 [sources]
-unknown-registry = "warn"
-unknown-git = "warn"
+unknown-registry = "deny"
+unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
   # OP Labs' shallow reth fork, pinned by the op-reth workspace to carry unreleased reth patches.
