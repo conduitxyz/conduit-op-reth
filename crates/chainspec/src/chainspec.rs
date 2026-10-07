@@ -11,7 +11,7 @@ use reth_optimism_chainspec::{
     OpChainSpec, SUPPORTED_CHAINS, generated_chain_value_parser, make_op_genesis_header,
 };
 use reth_optimism_forks::{OpHardfork, OpHardforks};
-use reth_primitives_traits::SealedHeader;
+use reth_primitives_traits::{Bytecode, SealedHeader};
 use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
@@ -392,6 +392,16 @@ impl ConduitOpChainSpec {
                 return Err(eyre::eyre!("{fork} blockTimeAtFork must be greater than zero"));
             }
 
+            // The transition decodes each code with `Bytecode::new_raw`, which panics on a
+            // malformed EIP-7702 designator; reject it here rather than at the activation block.
+            for (address, account) in &raw.updates {
+                if let Some(code) = &account.code {
+                    Bytecode::new_raw_checked(code.clone()).map_err(|err| {
+                        eyre::eyre!("{fork} code for {address} is not valid bytecode: {err}")
+                    })?;
+                }
+            }
+
             state_override_fork_activations[idx] = ForkCondition::Timestamp(raw.time);
             state_override_forks[idx] =
                 Some(StateOverrideForkConfig { updates: raw.updates, block_time_at_fork });
@@ -434,6 +444,18 @@ impl ConduitOpChainSpec {
                 raw.tx_gas_limit_cap.is_none()
             {
                 return Err(eyre::eyre!("EvmLimitsFork0 must configure at least one EVM limit"));
+            }
+
+            // REVM applies a zero limit literally rather than as "unset", so a zero
+            // txGasLimitCap would reject every non-deposit transaction.
+            if raw.max_code_size == Some(0) {
+                return Err(eyre::eyre!("EvmLimitsFork0 maxCodeSize must be greater than zero"));
+            }
+            if raw.max_initcode_size == Some(0) {
+                return Err(eyre::eyre!("EvmLimitsFork0 maxInitcodeSize must be greater than zero"));
+            }
+            if raw.tx_gas_limit_cap == Some(0) {
+                return Err(eyre::eyre!("EvmLimitsFork0 txGasLimitCap must be greater than zero"));
             }
 
             if let Some(conflicting_fork) =
@@ -797,6 +819,36 @@ mod tests {
         );
     }
 
+    /// The transition panics on code it cannot decode, so a malformed EIP-7702 designator must fail
+    /// at startup rather than at the activation block.
+    #[test]
+    fn state_override_rejects_malformed_eip7702_code() {
+        let with_code = |code: &str| {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_conduit_fork(5000)).unwrap();
+            genesis["config"]["conduit"]["stateOverrideFork0"]["updates"]["0x4200000000000000000000000000000000000042"]
+                ["code"] = serde_json::json!(code);
+            serde_json::to_string(&genesis).unwrap()
+        };
+        let address = "11".repeat(20);
+
+        // A well-formed designator still parses.
+        parse_spec(&with_code(&format!("0xef0100{address}")));
+
+        for bad in [
+            format!("0xef0100{}", "11".repeat(19)), // short address
+            format!("0xef0100{}", "11".repeat(21)), // long address
+            format!("0xef0101{address}"),           // unsupported version
+        ] {
+            let err = try_parse_spec(&with_code(&bad)).map(|_| ()).unwrap_err();
+            assert!(
+                err.to_string().contains("StateOverrideFork0 code for") &&
+                    err.to_string().contains("is not valid bytecode"),
+                "{bad}: unexpected error: {err}",
+            );
+        }
+    }
+
     /// Rounds must be contiguous from 0. A gap after the first round is the easy case to miss:
     /// checking only "is any earlier round configured" would accept fork0 + fork2 and silently
     /// drop the prerequisite the genesis meant to schedule.
@@ -1074,6 +1126,23 @@ mod tests {
 
             let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
             assert!(err.to_string().contains("must configure at least one EVM limit"));
+        }
+    }
+
+    /// REVM enforces a zero limit literally, so it would block every transaction or deployment.
+    #[test]
+    fn evm_limits_fork_rejects_zero_limits() {
+        for field in ["maxCodeSize", "maxInitcodeSize", "txGasLimitCap"] {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
+            genesis["config"]["conduit"]["evmLimitsFork0"][field] = serde_json::json!(0);
+
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("EvmLimitsFork0 {field} must be greater than zero")),
+                "{field}: unexpected error: {err}",
+            );
         }
     }
 
