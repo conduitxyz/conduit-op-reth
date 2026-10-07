@@ -2470,6 +2470,7 @@ dependencies = [
  "reth-revm",
  "reth-rpc-eth-api",
  "reth-rpc-eth-types",
+ "reth-rpc-server-types",
  "reth-tasks",
  "revm",
  "serde_json",

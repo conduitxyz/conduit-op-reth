@@ -31,6 +31,7 @@ use reth_optimism_trie::{
     db::{MdbxProofsStorage, MdbxProofsStorageV2},
 };
 use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
+use reth_rpc_server_types::RethRpcModule;
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -156,11 +157,13 @@ where
                 ctx.node().task_executor().clone(),
                 ctx.node().evm_config().clone(),
             );
-            let eth_replaced = ctx.modules.replace_configured(api_ext.into_rpc())?;
+            // Only install each override on transports that serve its namespace.
+            ctx.modules.add_or_replace_if_module_configured(RethRpcModule::Eth, api_ext.into_rpc())?;
             let auth_eth_replaced =
                 ctx.auth_module.replace_auth_methods(auth_api_ext.into_rpc())?;
-            let debug_replaced = ctx.modules.replace_configured(debug_ext.into_rpc())?;
-            info!(target: "reth::cli", eth_replaced, auth_eth_replaced, debug_replaced, "Proofs-history RPC overrides installed");
+            ctx.modules
+                .add_or_replace_if_module_configured(RethRpcModule::Debug, debug_ext.into_rpc())?;
+            info!(target: "reth::cli", auth_eth_replaced, "Proofs-history RPC overrides installed");
             Ok(())
         })
         .launch_with_debug_capabilities()
@@ -195,7 +198,8 @@ where
 
     info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
     let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
-    ctx.modules.add_or_replace_configured(ext.into_rpc())?;
+    // Only replace the methods on transports that serve the `eth` namespace.
+    ctx.modules.add_or_replace_if_module_configured(RethRpcModule::Eth, ext.into_rpc())?;
     info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
     Ok(())
 }
