@@ -33,7 +33,7 @@ use reth_primitives_traits::SealedHeader;
 use std::sync::Arc;
 
 /// Type configuration for the ConduitOp OP Stack node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct ConduitOpNode {
     /// Optimism rollup arguments.
@@ -59,16 +59,11 @@ pub struct ConduitOpNode {
     pub interop_failsafe: InteropFailsafe,
 }
 
-impl Default for ConduitOpNode {
-    fn default() -> Self {
-        Self::new(RollupArgs::default())
-    }
-}
-
 impl ConduitOpNode {
     /// Creates a new instance of the ConduitOp node type.
     pub fn new(args: RollupArgs) -> Self {
-        let operator_sdm_opt_in = OperatorSdmOptIn::configured(args.operator_sdm_opt_in);
+        let operator_sdm_opt_in = OperatorSdmOptIn::default();
+        operator_sdm_opt_in.set(args.operator_sdm_opt_in);
         Self {
             args,
             historical_rpc_block: None,
