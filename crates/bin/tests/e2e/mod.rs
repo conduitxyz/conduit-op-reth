@@ -241,9 +241,14 @@ macro_rules! launch_test_node_with_proofs {
                     ctx.node().task_executor().clone(),
                     ctx.node().evm_config().clone(),
                 );
-                let eth_replaced = ctx.modules.replace_configured(api_ext.into_rpc())?;
-                let debug_replaced = ctx.modules.replace_configured(debug_ext.into_rpc())?;
-                assert!(eth_replaced && debug_replaced, "proofs RPC overrides must install");
+                ctx.modules.add_or_replace_if_module_configured(
+                    reth_rpc_server_types::RethRpcModule::Eth,
+                    api_ext.into_rpc(),
+                )?;
+                ctx.modules.add_or_replace_if_module_configured(
+                    reth_rpc_server_types::RethRpcModule::Debug,
+                    debug_ext.into_rpc(),
+                )?;
                 Ok(())
             })
             .launch()

@@ -1,6 +1,6 @@
 use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks, STATE_OVERRIDE_FORKS};
 use alloy_consensus::Header;
-use alloy_genesis::Genesis;
+use alloy_genesis::{ChainConfig, Genesis};
 use alloy_primitives::{Address, B256, Bytes};
 use reth_chainspec::{
     Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
@@ -11,7 +11,7 @@ use reth_optimism_chainspec::{
     OpChainSpec, SUPPORTED_CHAINS, generated_chain_value_parser, make_op_genesis_header,
 };
 use reth_optimism_forks::{OpHardfork, OpHardforks};
-use reth_primitives_traits::SealedHeader;
+use reth_primitives_traits::{Bytecode, SealedHeader};
 use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
@@ -325,7 +325,13 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
 
         // Parse genesis JSON.
         let genesis: Genesis = parse_genesis(s)?;
+        Ok(Arc::new(ConduitOpChainSpec::from_genesis(genesis)?))
+    }
+}
 
+impl ConduitOpChainSpec {
+    /// Builds a chain specification from genesis data.
+    pub fn from_genesis(genesis: Genesis) -> eyre::Result<Self> {
         // Extract conduit config from extra_fields before converting to OpChainSpec.
         let extras: GenesisExtraFields = genesis
             .config
@@ -386,6 +392,16 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
                 return Err(eyre::eyre!("{fork} blockTimeAtFork must be greater than zero"));
             }
 
+            // The transition decodes each code with `Bytecode::new_raw`, which panics on a
+            // malformed EIP-7702 designator; reject it here rather than at the activation block.
+            for (address, account) in &raw.updates {
+                if let Some(code) = &account.code {
+                    Bytecode::new_raw_checked(code.clone()).map_err(|err| {
+                        eyre::eyre!("{fork} code for {address} is not valid bytecode: {err}")
+                    })?;
+                }
+            }
+
             state_override_fork_activations[idx] = ForkCondition::Timestamp(raw.time);
             state_override_forks[idx] =
                 Some(StateOverrideForkConfig { updates: raw.updates, block_time_at_fork });
@@ -430,6 +446,18 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
                 return Err(eyre::eyre!("EvmLimitsFork0 must configure at least one EVM limit"));
             }
 
+            // REVM applies a zero limit literally rather than as "unset", so a zero
+            // txGasLimitCap would reject every non-deposit transaction.
+            if raw.max_code_size == Some(0) {
+                return Err(eyre::eyre!("EvmLimitsFork0 maxCodeSize must be greater than zero"));
+            }
+            if raw.max_initcode_size == Some(0) {
+                return Err(eyre::eyre!("EvmLimitsFork0 maxInitcodeSize must be greater than zero"));
+            }
+            if raw.tx_gas_limit_cap == Some(0) {
+                return Err(eyre::eyre!("EvmLimitsFork0 txGasLimitCap must be greater than zero"));
+            }
+
             if let Some(conflicting_fork) =
                 op_chain_spec.inner.hardforks.forks_iter().find_map(|(fork, condition)| {
                     (condition == ForkCondition::Timestamp(raw.time)).then(|| fork.name())
@@ -455,13 +483,46 @@ impl ChainSpecParser for ConduitOpChainSpecParser {
             None
         };
 
-        Ok(Arc::new(ConduitOpChainSpec {
+        Ok(Self {
             inner: op_chain_spec,
             migration_block,
             state_override_forks,
             state_override_fork_activations,
             evm_limits_fork0,
-        }))
+        })
+    }
+
+    /// Builds a networking-only spec from `debug_chainConfig` and block zero.
+    ///
+    /// The genesis allocation is unavailable over these RPCs and remains empty.
+    /// Do not use the result to initialize chain state.
+    #[allow(clippy::needless_update)]
+    pub fn from_chain_config_for_networking(
+        chain_config: serde_json::Value,
+        genesis_header: Header,
+    ) -> eyre::Result<Self> {
+        let config: ChainConfig = serde_json::from_value(chain_config)?;
+        let genesis = Genesis {
+            config,
+            nonce: u64::from_be_bytes(genesis_header.nonce.0),
+            timestamp: genesis_header.timestamp,
+            extra_data: genesis_header.extra_data.clone(),
+            gas_limit: genesis_header.gas_limit,
+            difficulty: genesis_header.difficulty,
+            mix_hash: genesis_header.mix_hash,
+            coinbase: genesis_header.beneficiary,
+            alloc: Default::default(),
+            base_fee_per_gas: genesis_header.base_fee_per_gas.map(u128::from),
+            excess_blob_gas: genesis_header.excess_blob_gas,
+            blob_gas_used: genesis_header.blob_gas_used,
+            number: Some(genesis_header.number),
+            parent_hash: Some(genesis_header.parent_hash),
+            // Supports compatible alloy-genesis versions with fewer fields.
+            ..Default::default()
+        };
+        let mut spec = Self::from_genesis(genesis)?;
+        spec.inner.inner.genesis_header = SealedHeader::seal_slow(genesis_header);
+        Ok(spec)
     }
 }
 
@@ -758,6 +819,36 @@ mod tests {
         );
     }
 
+    /// The transition panics on code it cannot decode, so a malformed EIP-7702 designator must fail
+    /// at startup rather than at the activation block.
+    #[test]
+    fn state_override_rejects_malformed_eip7702_code() {
+        let with_code = |code: &str| {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_conduit_fork(5000)).unwrap();
+            genesis["config"]["conduit"]["stateOverrideFork0"]["updates"]["0x4200000000000000000000000000000000000042"]
+                ["code"] = serde_json::json!(code);
+            serde_json::to_string(&genesis).unwrap()
+        };
+        let address = "11".repeat(20);
+
+        // A well-formed designator still parses.
+        parse_spec(&with_code(&format!("0xef0100{address}")));
+
+        for bad in [
+            format!("0xef0100{}", "11".repeat(19)), // short address
+            format!("0xef0100{}", "11".repeat(21)), // long address
+            format!("0xef0101{address}"),           // unsupported version
+        ] {
+            let err = try_parse_spec(&with_code(&bad)).map(|_| ()).unwrap_err();
+            assert!(
+                err.to_string().contains("StateOverrideFork0 code for") &&
+                    err.to_string().contains("is not valid bytecode"),
+                "{bad}: unexpected error: {err}",
+            );
+        }
+    }
+
     /// Rounds must be contiguous from 0. A gap after the first round is the easy case to miss:
     /// checking only "is any earlier round configured" would accept fork0 + fork2 and silently
     /// drop the prerequisite the genesis meant to schedule.
@@ -1038,6 +1129,23 @@ mod tests {
         }
     }
 
+    /// REVM enforces a zero limit literally, so it would block every transaction or deployment.
+    #[test]
+    fn evm_limits_fork_rejects_zero_limits() {
+        for field in ["maxCodeSize", "maxInitcodeSize", "txGasLimitCap"] {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
+            genesis["config"]["conduit"]["evmLimitsFork0"][field] = serde_json::json!(0);
+
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("EvmLimitsFork0 {field} must be greater than zero")),
+                "{field}: unexpected error: {err}",
+            );
+        }
+    }
+
     #[test]
     fn evm_limits_fork_accepts_arbitrary_code_size_limits() {
         let mut genesis: serde_json::Value =
@@ -1078,6 +1186,52 @@ mod tests {
             ForkCondition::Timestamp(0),
         );
         assert!(spec.genesis_header().withdrawals_root.is_some());
+    }
+
+    #[test]
+    fn networking_constructor_matches_full_genesis_chain_identity_and_fork_ids() {
+        for chain_id in [901, 957, 99999] {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_conduit_forks_for_chain(chain_id, &[5000, 6000, 7000]))
+                    .unwrap();
+            genesis["alloc"] = serde_json::json!({
+                "0x4200000000000000000000000000000000000042": { "balance": "0x1" }
+            });
+            let expected = parse_spec(&genesis.to_string());
+            let config = genesis["config"].take();
+            let header = expected.genesis_header().clone();
+
+            let actual =
+                ConduitOpChainSpec::from_chain_config_for_networking(config, header.clone())
+                    .unwrap();
+
+            assert_eq!(actual.chain().id(), chain_id);
+            assert_eq!(actual.genesis_header(), &header);
+            assert_eq!(actual.genesis_hash(), expected.genesis_hash());
+            for timestamp in [0, 4999, 5000, 5999, 6000, 6999, 7000] {
+                assert_eq!(
+                    actual.fork_id(&head_at(timestamp)),
+                    expected.fork_id(&head_at(timestamp)),
+                    "fork ID mismatch for chain {chain_id} at timestamp {timestamp}",
+                );
+            }
+
+            let ids: Vec<ForkId> = [4999, 5000, 6000, 7000]
+                .into_iter()
+                .map(|timestamp| actual.fork_id(&head_at(timestamp)))
+                .collect();
+            let expected_next =
+                if chain_id == 99999 { [5000, 6000, 7000, 0] } else { [7000, 7000, 7000, 0] };
+            assert_eq!(ids.iter().map(|id| id.next).collect::<Vec<_>>(), expected_next);
+
+            if chain_id == 99999 {
+                assert!(ids.windows(2).all(|pair| pair[0].hash != pair[1].hash));
+            } else {
+                assert_eq!(ids[0].hash, ids[1].hash);
+                assert_eq!(ids[1].hash, ids[2].hash);
+                assert_ne!(ids[2].hash, ids[3].hash);
+            }
+        }
     }
 
     #[test]
