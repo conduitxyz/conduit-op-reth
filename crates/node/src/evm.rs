@@ -12,7 +12,7 @@ use alloy_evm::{
     Database, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFactory,
-        ExecutableTx, GasOutput, StateDB,
+        CommitChanges, ExecutableTx, GasOutput, StateDB,
     },
 };
 use alloy_op_evm::{
@@ -104,6 +104,17 @@ where
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
         self.inner.commit_transaction(output)
+    }
+
+    // Has a default body in the trait, so it must be forwarded explicitly to reach
+    // `OpBlockExecutor`'s override, which rolls back the refund policy state of a candidate
+    // whose commit is declined.
+    fn execute_transaction_with_commit_condition(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+        f: impl FnOnce(&Self::Result) -> CommitChanges,
+    ) -> Result<Option<GasOutput>, BlockExecutionError> {
+        self.inner.execute_transaction_with_commit_condition(tx, f)
     }
 
     fn finish(
