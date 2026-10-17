@@ -16,6 +16,7 @@ use conduit_op_reth_rpc_api::SlipstreamApiServer;
 use eyre::ErrReport;
 use futures_util::FutureExt;
 use jsonrpsee::types::ErrorObject;
+use reth_chainspec::EthChainSpec;
 use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::DatabaseMetrics;
 use reth_node_builder::{FullNodeComponents, NodeBuilder, WithLaunchContext, rpc::RpcContext};
@@ -62,6 +63,8 @@ pub async fn launch_node(
         );
     }
 
+    let chain_id = config.chain.chain_id();
+
     if !args.proofs_history {
         let flashblocks_enabled = args.flashblocks_url.is_some();
         let mut node = ConduitOpNode::new(args);
@@ -71,7 +74,12 @@ pub async fn launch_node(
             .extend_rpc_modules(move |mut ctx| {
                 let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
                 install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
-                install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)
+                install_slipstream_batch_proxy(
+                    &mut ctx,
+                    slipstream_enabled,
+                    sequencer_client,
+                    chain_id,
+                )
             })
             .launch_with_debug_capabilities()
             .await?;
@@ -121,6 +129,7 @@ where
         args.clone();
     let proofs_history_window = proofs_history_window.window;
     let flashblocks_enabled = args.flashblocks_url.is_some();
+    let chain_id = builder.config().chain.chain_id();
     let mut node = ConduitOpNode::new(args);
     node.historical_rpc_block = historical_rpc_block;
 
@@ -145,7 +154,7 @@ where
         .extend_rpc_modules(move |mut ctx| {
             let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
             install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
-            install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
+            install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client, chain_id)?;
 
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
             let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
@@ -209,6 +218,7 @@ fn install_slipstream_batch_proxy<N, EthApi>(
     ctx: &mut RpcContext<'_, N, EthApi>,
     slipstream_enabled: bool,
     sequencer_client: Option<SequencerClient>,
+    chain_id: u64,
 ) -> eyre::Result<()>
 where
     N: FullNodeComponents,
@@ -226,7 +236,7 @@ where
         endpoint = sequencer_client.endpoint(),
         "Installing Slipstream batch proxy"
     );
-    let proxy = SlipstreamProxy::new(sequencer_client);
+    let proxy = SlipstreamProxy::new(sequencer_client, chain_id);
     ctx.modules.add_or_replace_configured(SlipstreamApiServer::into_rpc(proxy))?;
     Ok(())
 }
