@@ -42,11 +42,11 @@ fn proofs_init_works_against_conduit_datadir() {
     run_cli(&["init", "--chain", genesis, "--datadir", datadir]);
 
     // ...must be readable by the upstream `proofs init` (via InnerOpChainSpecParser/OpNode),
-    // for both storage schemas, idempotently.
-    for version in ["v1", "v2"] {
+    // with both the default schema and the deprecated explicit v2 flag, idempotently.
+    for version in ["default", "v2"] {
         let proofs = tmp.path().join(format!("proofs-{version}"));
         let proofs = proofs.to_str().unwrap();
-        let args = [
+        let mut args = vec![
             "proofs",
             "init",
             "--chain",
@@ -55,10 +55,11 @@ fn proofs_init_works_against_conduit_datadir() {
             datadir,
             "--proofs-history.storage-path",
             proofs,
-            "--proofs-history.storage-version",
-            version,
             "--proofs-history.skip-backfill",
         ];
+        if version == "v2" {
+            args.extend(["--proofs-history.storage-version", "v2"]);
+        }
 
         let out = run_cli(&args);
         assert!(
