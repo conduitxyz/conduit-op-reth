@@ -12,7 +12,7 @@ use alloy_evm::{
     Database, EvmFactory, FromRecoveredTx, FromTxWithEncoded,
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFactory,
-        CommitChanges, ExecutableTx, GasOutput, StateDB,
+        ExecutableTx, GasOutput, StateDB,
     },
 };
 use alloy_op_evm::{
@@ -95,14 +95,6 @@ where
         Ok(())
     }
 
-    fn execute_transaction_with_commit_condition(
-        &mut self,
-        tx: impl ExecutableTx<Self>,
-        f: impl FnOnce(&Self::Result) -> CommitChanges,
-    ) -> Result<Option<GasOutput>, BlockExecutionError> {
-        self.inner.execute_transaction_with_commit_condition(tx, f)
-    }
-
     fn execute_transaction_without_commit(
         &mut self,
         tx: impl ExecutableTx<Self>,
@@ -139,6 +131,8 @@ where
     R: OpReceiptBuilder,
     Spec: OpHardforks + Clone,
 {
+    type Snapshot = E::Snapshot;
+
     fn post_exec_entries(&self) -> &[SDMGasEntry] {
         self.inner.post_exec_entries()
     }
@@ -151,8 +145,12 @@ where
         self.inner.take_refund_events_by_tx()
     }
 
-    fn resume_at_tx_index(&mut self, first_tx_index: u64) -> Result<(), BlockExecutionError> {
-        self.inner.resume_at_tx_index(first_tx_index)
+    fn refund_snapshot(&self) -> Self::Snapshot {
+        self.inner.refund_snapshot()
+    }
+
+    fn seed_refund_snapshot(&mut self, state: Self::Snapshot) {
+        self.inner.seed_refund_snapshot(state);
     }
 }
 
@@ -275,6 +273,9 @@ impl ConfigureEvm for ConduitOpEvmConfig {
 }
 
 impl ConfigurePostExecEvm for ConduitOpEvmConfig {
+    /// `OpEvmFactory<OpTx>` runs the default `NullRefundPolicy`, whose refund snapshot is empty.
+    type Snapshot = ();
+
     fn post_exec_executor_for_block<'a, DB: Database>(
         &'a self,
         db: &'a mut State<DB>,
@@ -284,7 +285,7 @@ impl ConfigurePostExecEvm for ConduitOpEvmConfig {
         impl BlockExecutor<
             Transaction = <Self::Primitives as NodePrimitives>::SignedTx,
             Receipt = <Self::Primitives as NodePrimitives>::Receipt,
-        > + PostExecExecutorExt
+        > + PostExecExecutorExt<Snapshot = Self::Snapshot>
         + 'a,
         Self::Error,
     > {
@@ -302,7 +303,7 @@ impl ConfigurePostExecEvm for ConduitOpEvmConfig {
     ) -> Result<
         impl BlockBuilder<
             Primitives = Self::Primitives,
-            Executor: PostExecExecutorExt
+            Executor: PostExecExecutorExt<Snapshot = Self::Snapshot>
                           + BlockExecutor<
                 Evm: alloy_evm::Evm<DB: core::ops::DerefMut<Target = State<DB>>>,
                 Result: PreRefundGasUsed,

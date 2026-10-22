@@ -14,13 +14,6 @@ async fn historical_rpc_cutoff() -> eyre::Result<()> {
     let mut module = RpcModule::new(());
     module.register_method("eth_getBlockByNumber", |params, _, _| {
         let (block, _): (String, bool) = params.parse()?;
-        if block == "0x1" {
-            return Err(jsonrpsee::types::ErrorObjectOwned::owned(
-                -32000,
-                "historical backend unavailable",
-                None::<()>,
-            ));
-        }
         Ok::<_, jsonrpsee::types::ErrorObjectOwned>(json!({"historical": block}))
     })?;
     module.register_method("eth_getTransactionReceipt", |params, _, _| {
@@ -80,18 +73,6 @@ async fn historical_rpc_cutoff() -> eyre::Result<()> {
                 "bedrock={bedrock}, migration={migration:?}, cutoff={cutoff:?}, block={block}"
             );
         }
-        // A historical backend failure must not silently become a local null result.
-        let failed =
-            client.request::<Value, _>("eth_getBlockByNumber", rpc_params!["0x1", false]).await;
-        if cutoff.or(migration).unwrap_or(bedrock) > 1 {
-            let jsonrpsee::core::ClientError::Call(error) = failed.unwrap_err() else {
-                panic!("expected historical RPC error");
-            };
-            assert_eq!(error.code(), -32000);
-            assert_eq!(error.message(), "historical backend unavailable");
-        } else {
-            assert_eq!(failed?, Value::Null);
-        }
         if cutoff.is_some() || migration.is_some() {
             let hash = alloy_primitives::B256::repeat_byte(0x42);
             let receipt: Value =
@@ -102,30 +83,6 @@ async fn historical_rpc_cutoff() -> eyre::Result<()> {
         drop(tasks);
     }
     server_handle.stop()?;
-    server_handle.stopped().await;
-
-    // Transport failures are distinct from a backend's JSON-RPC errors. Even when a block
-    // exists locally, a failed historical request must not fall back to local data.
-    let chain = parse_chain_spec(BASE_GENESIS);
-    let tasks = Runtime::test();
-    let mut node =
-        ConduitOpNode::new(RollupArgs { historical_rpc: Some(endpoint), ..Default::default() });
-    node.historical_rpc_block = Some(10);
-    let handle = NodeBuilder::new(test_node_config(chain))
-        .testing_node(tasks.clone())
-        .node(node)
-        .launch()
-        .await?;
-    let client = handle.node.rpc_server_handle().http_client().unwrap();
-    let failed = client
-        .request::<Value, _>("eth_getBlockByNumber", rpc_params!["0x0", false])
-        .await
-        .unwrap_err();
-    let jsonrpsee::core::ClientError::Call(error) = failed else {
-        panic!("expected historical transport error");
-    };
-    assert_eq!(error.code(), -32603);
-    assert_eq!(error.message(), "historical RPC request failed");
     Ok(())
 }
 

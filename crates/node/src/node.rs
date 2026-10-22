@@ -12,7 +12,7 @@ use reth_node_builder::{
     },
 };
 use reth_optimism_node::{
-    DerivedPayloadServiceBuilder, OpDAConfig, OpEngineApiBuilder, OpEngineTypes, OpStorage,
+    OpDAConfig, OpEngineApiBuilder, OpEngineTypes, OpStorage,
     args::RollupArgs,
     node::{
         OpAddOns, OpAddOnsBuilder, OpConsensusBuilder, OpEngineValidatorBuilder, OpFullNodeTypes,
@@ -123,7 +123,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         OpPoolBuilder,
-        DerivedPayloadServiceBuilder<BasicPayloadServiceBuilder<OpPayloadBuilder>>,
+        BasicPayloadServiceBuilder<OpPayloadBuilder>,
         OpNetworkBuilder,
         ConduitOpExecutorBuilder,
         OpConsensusBuilder,
@@ -149,12 +149,10 @@ where
                     )
                     .with_interop_failsafe(self.interop_failsafe.clone()),
             )
-            // Derived attributes must execute before FCU returns. Keep our custom EVM in
-            // both the synchronous validation path and the normal payload service.
-            .payload(DerivedPayloadServiceBuilder::new(BasicPayloadServiceBuilder::new(
+            .payload(BasicPayloadServiceBuilder::new(
                 OpPayloadBuilder::new(compute_pending_block)
                     .with_builder_config(self.builder_config()),
-            )))
+            ))
             .network(OpNetworkBuilder::new(disable_txpool_gossip, !discovery_v4))
             .consensus(OpConsensusBuilder::default())
     }
