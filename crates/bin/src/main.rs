@@ -48,6 +48,13 @@ fn main() {
     // Initialize conduit-op-reth version metadata before CLI parsing
     init_conduit_version().expect("Failed to initialize conduit-op-reth version metadata");
 
+    // Match op-reth: masked state persistence is not supported for OP nodes. The launcher
+    // also rejects a nonzero effective window supplied explicitly by an operator.
+    reth_node_core::args::DefaultEngineValues::default()
+        .with_num_state_masking_blocks(0)
+        .try_init()
+        .expect("engine defaults must be initialized before CLI parsing");
+
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe {
             std::env::set_var("RUST_BACKTRACE", "1");
@@ -194,10 +201,21 @@ mod tests {
             "--proofs-history.verification-interval",
             "1",
             "--proofs-history.storage-version",
-            "v1",
+            "v2",
         ];
         <ConduitCli as clap::Parser>::try_parse_from(node_args)
             .expect("node proofs-history flags must parse");
+
+        for command in [vec!["node"], vec!["proofs", "init"]] {
+            let error = ConduitCli::try_parse_from(
+                ["conduit-op-reth"]
+                    .into_iter()
+                    .chain(command)
+                    .chain(["--proofs-history.storage-version", "v1"]),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("only `v2` is supported"));
+        }
     }
 
     #[test]
