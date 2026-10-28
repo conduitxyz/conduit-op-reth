@@ -92,6 +92,7 @@ alloy-signer-local.workspace = true
 alloy-network.workspace = true
 alloy-consensus.workspace = true
 alloy-rpc-types-eth.workspace = true
+op-alloy-consensus.workspace = true
 alloy-sol-macro.workspace = true
 alloy-sol-types.workspace = true
 revm.workspace = true

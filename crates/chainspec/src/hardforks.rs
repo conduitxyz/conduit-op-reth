@@ -26,6 +26,12 @@ hardfork!(
         StateOverrideFork9,
         /// Applies configured EVM limits while preserving the active OP hardfork semantics.
         EvmLimitsFork0,
+        /// Activates the contract deployer allowlist precompile and enforces it on every
+        /// contract creation, for both L2 transactions and deposits.
+        DeployerAllowListFork0,
+        /// Activates the transaction allowlist precompile and enforces it on every transaction
+        /// sender, for both L2 transactions and deposits.
+        TxAllowListFork0,
     }
 );
 
@@ -60,7 +66,7 @@ impl ConduitOpHardfork {
             Self::StateOverrideFork7 => Some(7),
             Self::StateOverrideFork8 => Some(8),
             Self::StateOverrideFork9 => Some(9),
-            Self::EvmLimitsFork0 => None,
+            Self::EvmLimitsFork0 | Self::DeployerAllowListFork0 | Self::TxAllowListFork0 => None,
         }
     }
 }
@@ -86,6 +92,19 @@ pub trait ConduitOpHardforks: OpHardforks {
     fn is_evm_limits_fork0_active_at_timestamp(&self, timestamp: u64) -> bool {
         self.is_conduit_op_fork_active_at_timestamp(ConduitOpHardfork::EvmLimitsFork0, timestamp)
     }
+
+    /// Checks if DeployerAllowListFork0 is active at the given timestamp.
+    fn is_deployer_allowlist_fork0_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.is_conduit_op_fork_active_at_timestamp(
+            ConduitOpHardfork::DeployerAllowListFork0,
+            timestamp,
+        )
+    }
+
+    /// Checks if TxAllowListFork0 is active at the given timestamp.
+    fn is_tx_allowlist_fork0_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.is_conduit_op_fork_active_at_timestamp(ConduitOpHardfork::TxAllowListFork0, timestamp)
+    }
 }
 
 #[cfg(test)]
@@ -100,6 +119,8 @@ mod tests {
             assert_eq!(fork.state_override_index(), Some(idx), "{fork} index mismatch");
         }
         assert_eq!(ConduitOpHardfork::EvmLimitsFork0.state_override_index(), None);
+        assert_eq!(ConduitOpHardfork::DeployerAllowListFork0.state_override_index(), None);
+        assert_eq!(ConduitOpHardfork::TxAllowListFork0.state_override_index(), None);
     }
 
     /// Guards against a variant being added to the enum but left out of `STATE_OVERRIDE_FORKS`.
