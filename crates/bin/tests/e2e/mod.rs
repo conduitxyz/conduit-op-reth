@@ -5,6 +5,7 @@ use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
 use reth_optimism_node::{OpPayloadAttributes, payload::OpPayloadAttrs};
 use std::sync::Arc;
 
+pub mod allowlist_test;
 pub mod evm_limits_test;
 pub mod genesis_validation_test;
 pub mod historical_rpc_test;

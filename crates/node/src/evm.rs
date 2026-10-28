@@ -4,8 +4,9 @@
 //! at each state override round's activation block.
 
 use crate::{
-    chainspec::ConduitOpChainSpec, hardforks::ConduitOpHardforks,
-    state_override::ensure_state_override,
+    chainspec::ConduitOpChainSpec, deployer_allowlist::ensure_deployer_allowlist,
+    hardforks::ConduitOpHardforks, policy_evm::ConduitOpEvmFactory,
+    state_override::ensure_state_override, tx_allowlist::ensure_tx_allowlist,
 };
 use alloy_consensus::Header;
 use alloy_evm::{
@@ -92,6 +93,11 @@ where
             .map_err(BlockExecutionError::other)?;
         }
 
+        ensure_deployer_allowlist(chain_spec.as_ref(), timestamp, self.inner.evm.db_mut())
+            .map_err(BlockExecutionError::other)?;
+        ensure_tx_allowlist(chain_spec.as_ref(), timestamp, self.inner.evm.db_mut())
+            .map_err(BlockExecutionError::other)?;
+
         Ok(())
     }
 
@@ -155,7 +161,7 @@ where
 }
 
 impl BlockExecutorFactory for ConduitOpEvmConfig {
-    type EvmFactory = <InnerBlockExecutorFactory as BlockExecutorFactory>::EvmFactory;
+    type EvmFactory = ConduitOpEvmFactory;
     type TxExecutionResult = <InnerBlockExecutorFactory as BlockExecutorFactory>::TxExecutionResult;
     type ExecutionCtx<'a> = OpBlockExecutionCtx;
     type Transaction = <InnerBlockExecutorFactory as BlockExecutorFactory>::Transaction;
@@ -168,7 +174,7 @@ impl BlockExecutorFactory for ConduitOpEvmConfig {
         >;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
-        self.inner.executor_factory.evm_factory()
+        &self.evm_factory
     }
 
     fn create_executor<'a, DB, I>(
@@ -180,7 +186,7 @@ impl BlockExecutorFactory for ConduitOpEvmConfig {
         DB: StateDB,
         I: Inspector<<Self::EvmFactory as EvmFactory>::Context<DB>>,
     {
-        let inner = self.inner.executor_factory.create_executor(evm, ctx);
+        let inner = OpBlockExecutor::new(evm, ctx, &self.chain_spec, self.receipt_builder());
         ConduitOpBlockExecutor { inner, chain_spec: self.chain_spec.clone() }
     }
 }
@@ -189,18 +195,21 @@ impl BlockExecutorFactory for ConduitOpEvmConfig {
 ///
 /// Delegates all standard OP behavior to the inner config but overrides
 /// `create_executor` to wrap each [`OpBlockExecutor`] in a [`ConduitOpBlockExecutor`]
-/// for custom state transitions.
+/// for custom state transitions, and creates every EVM through [`ConduitOpEvmFactory`] so the
+/// allowlists apply to all execution and building done through this config.
 #[derive(Debug, Clone)]
 pub struct ConduitOpEvmConfig {
     inner: OpEvmConfig<ConduitOpChainSpec, OpPrimitives>,
     chain_spec: Arc<ConduitOpChainSpec>,
+    evm_factory: ConduitOpEvmFactory,
 }
 
 impl ConduitOpEvmConfig {
     /// Creates a new [`ConduitOpEvmConfig`].
     pub fn new(chain_spec: Arc<ConduitOpChainSpec>) -> Self {
         let inner = OpEvmConfig::new(chain_spec.clone(), OpRethReceiptBuilder::default());
-        Self { inner, chain_spec }
+        let evm_factory = ConduitOpEvmFactory::new(&chain_spec);
+        Self { inner, chain_spec, evm_factory }
     }
 
     /// Returns the receipt builder used by the block executor factory.

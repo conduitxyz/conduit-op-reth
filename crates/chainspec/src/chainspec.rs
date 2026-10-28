@@ -1,7 +1,7 @@
 use crate::hardforks::{ConduitOpHardfork, ConduitOpHardforks, STATE_OVERRIDE_FORKS};
 use alloy_consensus::Header;
 use alloy_genesis::{ChainConfig, Genesis};
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes, U160};
 use reth_chainspec::{
     Chain, DepositContract, EthChainSpec, EthereumHardfork, EthereumHardforks, ForkCondition,
     ForkFilter, ForkId, Hardfork, Hardforks, Head,
@@ -54,6 +54,63 @@ pub struct EvmLimitsFork0Config {
     pub tx_gas_limit_cap: Option<u64>,
 }
 
+/// Rule enforced by an allowlist precompile (deployer or transaction allowlist).
+///
+/// The discriminant is the value stored on chain and returned by `mode()`.
+///
+/// There is deliberately no default: a genesis section must choose its mode, since defaulting to
+/// allowlist mode would deny every unlisted account at activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[repr(u8)]
+pub enum AllowListMode {
+    /// Everyone is allowed.
+    Off = 0,
+    /// Only accounts holding the Enabled, Manager or Admin role are allowed.
+    Allowlist = 1,
+    /// Everyone is allowed except blocked accounts.
+    Denylist = 2,
+}
+
+impl AllowListMode {
+    /// Decodes a stored mode value, or `None` if it is not a known mode.
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Off),
+            1 => Some(Self::Allowlist),
+            2 => Some(Self::Denylist),
+            _ => None,
+        }
+    }
+}
+
+/// Initial state of an allowlist precompile, written when its fork activates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowListConfig {
+    /// Initial rule.
+    pub mode: AllowListMode,
+    /// Accounts granted the Admin role.
+    pub admin_addresses: Vec<Address>,
+    /// Accounts granted the Manager role.
+    pub manager_addresses: Vec<Address>,
+    /// Accounts granted the Enabled role.
+    pub enabled_addresses: Vec<Address>,
+    /// Accounts blocked while in denylist mode.
+    pub blocked_addresses: Vec<Address>,
+    /// Accounts whose role can never be removed or blocked once seeded.
+    pub protected_addresses: Vec<Address>,
+}
+
+/// Offset OP Stack adds to an L1 contract's address to form its L2 sender for deposits.
+const L1_TO_L2_ALIAS_OFFSET: U160 =
+    U160::from_be_slice(&[0x11, 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11]);
+
+/// Returns the L2 sender of deposits made by the L1 contract at `l1_address`.
+pub fn l1_to_l2_alias(l1_address: Address) -> Address {
+    let aliased = U160::from_be_bytes(l1_address.0.0).wrapping_add(L1_TO_L2_ALIAS_OFFSET);
+    Address::from(aliased.to_be_bytes())
+}
+
 /// Custom chain spec wrapping [`OpChainSpec`] with ConduitOp-specific fork configuration.
 ///
 /// Custom hardforks are registered in the inner [`OpChainSpec`] hardfork list by default so they
@@ -74,6 +131,10 @@ pub struct ConduitOpChainSpec {
     state_override_fork_activations: [ForkCondition; STATE_OVERRIDE_FORKS.len()],
     /// EVM limits applied when EvmLimitsFork0 is active (None if not configured).
     pub evm_limits_fork0: Option<EvmLimitsFork0Config>,
+    /// Initial deployer allowlist state for DeployerAllowListFork0 (None if not configured).
+    pub deployer_allowlist_fork0: Option<AllowListConfig>,
+    /// Initial transaction allowlist state for TxAllowListFork0 (None if not configured).
+    pub tx_allowlist_fork0: Option<AllowListConfig>,
 }
 
 impl ConduitOpChainSpec {
@@ -215,6 +276,8 @@ struct ConduitOpGenesisConfig {
     state_override_fork8: Option<StateOverrideForkRaw>,
     state_override_fork9: Option<StateOverrideForkRaw>,
     evm_limits_fork0: Option<EvmLimitsFork0Raw>,
+    deployer_allow_list_fork0: Option<AllowListForkRaw>,
+    tx_allow_list_fork0: Option<AllowListForkRaw>,
 }
 
 impl ConduitOpGenesisConfig {
@@ -253,6 +316,23 @@ struct EvmLimitsFork0Raw {
     tx_gas_limit_cap: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AllowListForkRaw {
+    time: u64,
+    mode: AllowListMode,
+    admin_addresses: Vec<Address>,
+    #[serde(default)]
+    manager_addresses: Vec<Address>,
+    #[serde(default)]
+    enabled_addresses: Vec<Address>,
+    #[serde(default)]
+    blocked_addresses: Vec<Address>,
+    /// L1 address of the chain's `L1CrossDomainMessenger`. Required by, and only valid for,
+    /// TxAllowListFork0: every bridge deposit is sent from its alias.
+    l1_cross_domain_messenger: Option<Address>,
+}
+
 // OP Stack block time, and the transition-detection assumption every existing genesis was
 // written under. A round on a chain with different spacing sets `blockTimeAtFork` explicitly.
 const DEFAULT_BLOCK_TIME_AT_FORK: u64 = 2;
@@ -270,6 +350,103 @@ const STATE_OVERRIDE_FORK_ID_EXCLUDED_ROUNDS: usize = 2;
 
 fn exclude_state_override_from_fork_id(op_chain_spec: &OpChainSpec) -> bool {
     STATE_OVERRIDE_FORK_ID_EXCLUDED_CHAIN_IDS.contains(&op_chain_spec.inner.genesis.config.chain_id)
+}
+
+/// Checks that `fork` activates after genesis and at a timestamp no other fork uses, so that
+/// scheduling it changes the chain's fork ID.
+fn ensure_new_fork_timestamp(
+    op_chain_spec: &OpChainSpec,
+    fork: ConduitOpHardfork,
+    time: u64,
+) -> eyre::Result<()> {
+    let genesis_timestamp = op_chain_spec.genesis_header().timestamp;
+    if time <= genesis_timestamp {
+        return Err(eyre::eyre!(
+            "{fork} timestamp {time} must be after genesis timestamp {genesis_timestamp}"
+        ));
+    }
+
+    if let Some(conflicting_fork) =
+        op_chain_spec.inner.hardforks.forks_iter().find_map(|(other, condition)| {
+            (condition == ForkCondition::Timestamp(time)).then(|| other.name())
+        })
+    {
+        return Err(eyre::eyre!(
+            "{fork} timestamp {time} conflicts with {conflicting_fork}; a distinct timestamp is required for a new fork ID"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validates an allowlist fork's genesis section and schedules the fork.
+fn parse_allowlist_fork(
+    op_chain_spec: &mut OpChainSpec,
+    fork: ConduitOpHardfork,
+    raw: AllowListForkRaw,
+) -> eyre::Result<AllowListConfig> {
+    ensure_new_fork_timestamp(op_chain_spec, fork, raw.time)?;
+
+    // Without an admin nobody could ever change the policy again.
+    if raw.admin_addresses.is_empty() {
+        return Err(eyre::eyre!("{fork} requires at least one admin address"));
+    }
+    // Each account holds exactly one role; listing it twice would make the initial role depend
+    // on the order the lists are applied in.
+    let mut seen = std::collections::HashSet::new();
+    for address in
+        raw.admin_addresses.iter().chain(&raw.manager_addresses).chain(&raw.enabled_addresses)
+    {
+        if !seen.insert(*address) {
+            return Err(eyre::eyre!("{fork} lists {address} under more than one role"));
+        }
+    }
+
+    // Every standard-bridge and messenger deposit is sent from the messenger's alias. If the
+    // transaction allowlist ever denied it, those deposits would run as no-ops: the L1 funds stay
+    // locked and the message is never recorded on L2, so it cannot be replayed. Require it to
+    // start out allowed in every mode, since an admin may switch modes later; the precompile then
+    // refuses to remove its role or block it.
+    let protected_addresses = match (fork, raw.l1_cross_domain_messenger) {
+        (ConduitOpHardfork::TxAllowListFork0, Some(messenger)) => {
+            let alias = l1_to_l2_alias(messenger);
+            if !seen.contains(&alias) {
+                return Err(eyre::eyre!(
+                    "{fork} must grant a role to {alias}, the alias of l1CrossDomainMessenger \
+                     {messenger}, or bridge deposits would be lost"
+                ));
+            }
+            if raw.blocked_addresses.contains(&alias) {
+                return Err(eyre::eyre!(
+                    "{fork} must not block {alias}, the alias of l1CrossDomainMessenger \
+                     {messenger}, or bridge deposits would be lost"
+                ));
+            }
+            vec![alias]
+        }
+        (ConduitOpHardfork::TxAllowListFork0, None) => {
+            return Err(eyre::eyre!("{fork} requires l1CrossDomainMessenger"));
+        }
+        (_, Some(_)) => {
+            return Err(eyre::eyre!("{fork} does not accept l1CrossDomainMessenger"));
+        }
+        (_, None) => Vec::new(),
+    };
+
+    op_chain_spec.inner.hardforks.insert(fork, ForkCondition::Timestamp(raw.time));
+    eprintln!(
+        "{fork} scheduled at timestamp {} for chain ID {}",
+        raw.time, op_chain_spec.inner.genesis.config.chain_id
+    );
+
+    Ok(AllowListConfig {
+        mode: raw.mode,
+        admin_addresses: raw.admin_addresses,
+        manager_addresses: raw.manager_addresses,
+        enabled_addresses: raw.enabled_addresses,
+        blocked_addresses: raw.blocked_addresses,
+        protected_addresses,
+    })
 }
 
 fn use_legacy_genesis_header_for_known_chains(op_chain_spec: &mut OpChainSpec) -> bool {
@@ -308,6 +485,8 @@ impl From<OpChainSpec> for ConduitOpChainSpec {
             state_override_forks: [const { None }; STATE_OVERRIDE_FORKS.len()],
             state_override_fork_activations: [ForkCondition::Never; STATE_OVERRIDE_FORKS.len()],
             evm_limits_fork0: None,
+            deployer_allowlist_fork0: None,
+            tx_allowlist_fork0: None,
         }
     }
 }
@@ -342,6 +521,8 @@ impl ConduitOpChainSpec {
         let mut conduit_config = extras.conduit.unwrap_or_default();
         let migration_block = conduit_config.migration_block;
         let raw_evm_limits_fork0 = conduit_config.evm_limits_fork0.take();
+        let raw_deployer_allowlist_fork0 = conduit_config.deployer_allow_list_fork0.take();
+        let raw_tx_allowlist_fork0 = conduit_config.tx_allow_list_fork0.take();
         let raw_state_override_forks = conduit_config.state_override_forks();
 
         // Convert genesis to OpChainSpec (handles all OP hardfork parsing).
@@ -430,14 +611,7 @@ impl ConduitOpChainSpec {
                 }
             }
 
-            let genesis_timestamp = op_chain_spec.genesis_header().timestamp;
-            if raw.time <= genesis_timestamp {
-                return Err(eyre::eyre!(
-                    "EvmLimitsFork0 timestamp {} must be after genesis timestamp {}",
-                    raw.time,
-                    genesis_timestamp
-                ));
-            }
+            ensure_new_fork_timestamp(&op_chain_spec, ConduitOpHardfork::EvmLimitsFork0, raw.time)?;
 
             if raw.max_code_size.is_none() &&
                 raw.max_initcode_size.is_none() &&
@@ -458,17 +632,6 @@ impl ConduitOpChainSpec {
                 return Err(eyre::eyre!("EvmLimitsFork0 txGasLimitCap must be greater than zero"));
             }
 
-            if let Some(conflicting_fork) =
-                op_chain_spec.inner.hardforks.forks_iter().find_map(|(fork, condition)| {
-                    (condition == ForkCondition::Timestamp(raw.time)).then(|| fork.name())
-                })
-            {
-                return Err(eyre::eyre!(
-                    "EvmLimitsFork0 timestamp {} conflicts with {conflicting_fork}; a distinct timestamp is required for a new fork ID",
-                    raw.time
-                ));
-            }
-
             op_chain_spec
                 .inner
                 .hardforks
@@ -483,12 +646,29 @@ impl ConduitOpChainSpec {
             None
         };
 
+        let deployer_allowlist_fork0 = raw_deployer_allowlist_fork0
+            .map(|raw| {
+                parse_allowlist_fork(
+                    &mut op_chain_spec,
+                    ConduitOpHardfork::DeployerAllowListFork0,
+                    raw,
+                )
+            })
+            .transpose()?;
+        let tx_allowlist_fork0 = raw_tx_allowlist_fork0
+            .map(|raw| {
+                parse_allowlist_fork(&mut op_chain_spec, ConduitOpHardfork::TxAllowListFork0, raw)
+            })
+            .transpose()?;
+
         Ok(Self {
             inner: op_chain_spec,
             migration_block,
             state_override_forks,
             state_override_fork_activations,
             evm_limits_fork0,
+            deployer_allowlist_fork0,
+            tx_allowlist_fork0,
         })
     }
 
@@ -1088,6 +1268,279 @@ mod tests {
         let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
         assert!(err.to_string().contains("conflicts with StateOverrideFork0"));
         assert!(err.to_string().contains("distinct timestamp is required for a new fork ID"));
+    }
+
+    const ADMIN: Address = alloy_primitives::address!("00000000000000000000000000000000000ad111");
+
+    fn with_deployer_allowlist_fork(fork_time: u64) -> String {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        genesis["config"]["conduit"] = serde_json::json!({
+            "deployerAllowListFork0": {
+                "time": fork_time,
+                "mode": "allowlist",
+                "adminAddresses": [ADMIN],
+            }
+        });
+        serde_json::to_string(&genesis).unwrap()
+    }
+
+    #[test]
+    fn parse_deployer_allowlist_fork() {
+        let spec = parse_spec(&with_deployer_allowlist_fork(2000));
+
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::DeployerAllowListFork0),
+            ForkCondition::Timestamp(2000)
+        );
+        assert!(!spec.is_deployer_allowlist_fork0_active_at_timestamp(1999));
+        assert!(spec.is_deployer_allowlist_fork0_active_at_timestamp(2000));
+        assert_eq!(
+            spec.deployer_allowlist_fork0,
+            Some(AllowListConfig {
+                mode: AllowListMode::Allowlist,
+                admin_addresses: vec![ADMIN],
+                manager_addresses: vec![],
+                enabled_addresses: vec![],
+                blocked_addresses: vec![],
+                protected_addresses: vec![],
+            })
+        );
+
+        // Registered in the hardfork list so scheduling it changes the fork ID.
+        let names: Vec<_> = spec.forks_iter().map(|(fork, _)| fork.name()).collect();
+        assert!(names.contains(&"DeployerAllowListFork0"));
+        assert_ne!(spec.fork_id(&head_at(1999)), spec.fork_id(&head_at(2000)));
+    }
+
+    #[test]
+    fn parse_deployer_allowlist_fork_with_every_field() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_deployer_allowlist_fork(2000)).unwrap();
+        let manager = alloy_primitives::address!("0000000000000000000000000000000000000222");
+        let enabled = alloy_primitives::address!("0000000000000000000000000000000000000333");
+        let blocked = alloy_primitives::address!("0000000000000000000000000000000000000444");
+        genesis["config"]["conduit"]["deployerAllowListFork0"] = serde_json::json!({
+            "time": 2000,
+            "mode": "denylist",
+            "adminAddresses": [ADMIN],
+            "managerAddresses": [manager],
+            "enabledAddresses": [enabled],
+            "blockedAddresses": [blocked],
+        });
+
+        let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+        let config = spec.deployer_allowlist_fork0.clone().unwrap();
+        assert_eq!(config.mode, AllowListMode::Denylist);
+        assert_eq!(config.manager_addresses, vec![manager]);
+        assert_eq!(config.enabled_addresses, vec![enabled]);
+        assert_eq!(config.blocked_addresses, vec![blocked]);
+    }
+
+    #[test]
+    fn deployer_allowlist_fork_is_inactive_when_not_configured() {
+        let spec = parse_spec(BASE_GENESIS);
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::DeployerAllowListFork0),
+            ForkCondition::Never
+        );
+        assert!(spec.deployer_allowlist_fork0.is_none());
+    }
+
+    #[test]
+    fn deployer_allowlist_fork_requires_an_admin() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_deployer_allowlist_fork(2000)).unwrap();
+        genesis["config"]["conduit"]["deployerAllowListFork0"]["adminAddresses"] =
+            serde_json::json!([]);
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("requires at least one admin address"));
+    }
+
+    #[test]
+    fn deployer_allowlist_fork_rejects_an_account_with_two_roles() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_deployer_allowlist_fork(2000)).unwrap();
+        genesis["config"]["conduit"]["deployerAllowListFork0"]["enabledAddresses"] =
+            serde_json::json!([ADMIN]);
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("under more than one role"));
+    }
+
+    #[test]
+    fn deployer_allowlist_fork_must_be_after_genesis() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_deployer_allowlist_fork(1500)).unwrap();
+        genesis["timestamp"] = serde_json::json!("0x5dc");
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains("DeployerAllowListFork0 timestamp 1500 must be after genesis")
+        );
+    }
+
+    #[test]
+    fn parse_tx_allowlist_fork_alongside_deployer_allowlist() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_deployer_allowlist_fork(2000)).unwrap();
+        genesis["config"]["conduit"]["txAllowListFork0"] = serde_json::json!({
+            "time": 3000,
+            "mode": "denylist",
+            "adminAddresses": [ADMIN],
+            "enabledAddresses": [l1_to_l2_alias(L1_MESSENGER)],
+            "l1CrossDomainMessenger": L1_MESSENGER,
+        });
+
+        let spec = parse_spec(&serde_json::to_string(&genesis).unwrap());
+        assert_eq!(
+            spec.conduit_op_fork_activation(ConduitOpHardfork::TxAllowListFork0),
+            ForkCondition::Timestamp(3000)
+        );
+        assert!(!spec.is_tx_allowlist_fork0_active_at_timestamp(2999));
+        assert!(spec.is_tx_allowlist_fork0_active_at_timestamp(3000));
+        let tx_allowlist = spec.tx_allowlist_fork0.as_ref().unwrap();
+        assert_eq!(tx_allowlist.mode, AllowListMode::Denylist);
+        assert_eq!(tx_allowlist.protected_addresses, vec![l1_to_l2_alias(L1_MESSENGER)]);
+        // The two allowlists are configured independently.
+        assert_eq!(spec.deployer_allowlist_fork0.as_ref().unwrap().mode, AllowListMode::Allowlist);
+    }
+
+    /// Both allowlist forks on one timestamp would leave the fork ID unchanged for a client that
+    /// knows only one of them, so the configuration is rejected at startup.
+    #[test]
+    fn allowlist_forks_require_distinct_timestamps() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_deployer_allowlist_fork(2000)).unwrap();
+        genesis["config"]["conduit"]["txAllowListFork0"] =
+            serde_json::json!({ "time": 2000, "mode": "allowlist", "adminAddresses": [ADMIN] });
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "TxAllowListFork0 timestamp 2000 conflicts with DeployerAllowListFork0; a distinct timestamp is required for a new fork ID"
+            ),
+            "{err}"
+        );
+    }
+
+    /// OP Mainnet's `L1CrossDomainMessenger`.
+    const L1_MESSENGER: Address =
+        alloy_primitives::address!("25ace71c97b33cc4729cf772ae268934f7ab5fa1");
+
+    fn with_tx_allowlist_fork(fields: serde_json::Value) -> eyre::Result<Arc<ConduitOpChainSpec>> {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        let mut fork =
+            serde_json::json!({ "time": 2000, "mode": "allowlist", "adminAddresses": [ADMIN] });
+        fork.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        genesis["config"]["conduit"] = serde_json::json!({ "txAllowListFork0": fork });
+        try_parse_spec(&serde_json::to_string(&genesis).unwrap())
+    }
+
+    #[test]
+    fn l1_to_l2_alias_matches_op_mainnet() {
+        // The aliased L1CrossDomainMessenger that sends every OP Mainnet bridge deposit.
+        assert_eq!(
+            l1_to_l2_alias(L1_MESSENGER),
+            alloy_primitives::address!("36bde71c97b33cc4729cf772ae268934f7ab70b2")
+        );
+        // The addition wraps at 2^160.
+        assert_eq!(
+            l1_to_l2_alias(alloy_primitives::address!("ffffffffffffffffffffffffffffffffffffffff")),
+            alloy_primitives::address!("1111000000000000000000000000000000001110")
+        );
+    }
+
+    #[test]
+    fn tx_allowlist_fork_requires_the_messenger() {
+        let err = with_tx_allowlist_fork(serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("TxAllowListFork0 requires l1CrossDomainMessenger"));
+    }
+
+    #[test]
+    fn tx_allowlist_fork_requires_the_messenger_alias_to_have_a_role() {
+        let alias = l1_to_l2_alias(L1_MESSENGER);
+        // Required in every mode, since an admin may switch modes later.
+        for mode in ["off", "allowlist", "denylist"] {
+            let err = with_tx_allowlist_fork(serde_json::json!({
+                "mode": mode,
+                "l1CrossDomainMessenger": L1_MESSENGER,
+            }))
+            .unwrap_err();
+            assert!(err.to_string().contains(&format!("must grant a role to {alias}")), "{err}");
+        }
+
+        // Any role satisfies it.
+        for role in ["enabledAddresses", "managerAddresses"] {
+            with_tx_allowlist_fork(serde_json::json!({
+                role: [alias],
+                "l1CrossDomainMessenger": L1_MESSENGER,
+            }))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn tx_allowlist_fork_rejects_a_blocked_messenger_alias() {
+        let alias = l1_to_l2_alias(L1_MESSENGER);
+        let err = with_tx_allowlist_fork(serde_json::json!({
+            "mode": "denylist",
+            "enabledAddresses": [alias],
+            "blockedAddresses": [alias],
+            "l1CrossDomainMessenger": L1_MESSENGER,
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains(&format!("must not block {alias}")), "{err}");
+    }
+
+    #[test]
+    fn deployer_allowlist_fork_rejects_the_messenger_field() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_deployer_allowlist_fork(2000)).unwrap();
+        genesis["config"]["conduit"]["deployerAllowListFork0"]["l1CrossDomainMessenger"] =
+            serde_json::json!(L1_MESSENGER);
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("DeployerAllowListFork0 does not accept l1CrossDomainMessenger")
+        );
+    }
+
+    #[test]
+    fn allowlist_forks_require_a_mode() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_deployer_allowlist_fork(2000)).unwrap();
+        genesis["config"]["conduit"]["deployerAllowListFork0"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mode");
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("missing field `mode`"), "{err}");
+    }
+
+    #[test]
+    fn tx_allowlist_fork_requires_an_admin() {
+        let mut genesis: serde_json::Value = serde_json::from_str(BASE_GENESIS).unwrap();
+        genesis["config"]["conduit"] = serde_json::json!({ "txAllowListFork0": { "time": 2000, "mode": "off", "adminAddresses": [] } });
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("TxAllowListFork0 requires at least one admin address"));
+    }
+
+    #[test]
+    fn deployer_allowlist_fork_requires_distinct_fork_id_timestamp() {
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_evm_limits_fork(Some(1000), 2000)).unwrap();
+        genesis["config"]["conduit"]["deployerAllowListFork0"] =
+            serde_json::json!({ "time": 2000, "mode": "allowlist", "adminAddresses": [ADMIN] });
+
+        let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("DeployerAllowListFork0 timestamp 2000 conflicts with EvmLimitsFork0")
+        );
     }
 
     #[test]
