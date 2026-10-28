@@ -11,6 +11,7 @@ pub mod genesis_validation_test;
 pub mod historical_rpc_test;
 pub mod proofs_history_test;
 pub mod state_override_test;
+pub mod tracked_nonce_test;
 
 /// Solidity contract preamble: PUSH1 0x80 PUSH1 0x40 MSTORE.
 pub const TARGET_BYTECODE: &[u8] = &[0x60, 0x80, 0x60, 0x40, 0x52];

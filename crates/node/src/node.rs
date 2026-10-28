@@ -1,4 +1,6 @@
-use crate::{chainspec::ConduitOpChainSpec, evm::ConduitOpExecutorBuilder};
+use crate::{
+    chainspec::ConduitOpChainSpec, evm::ConduitOpExecutorBuilder, pool::ConduitOpPoolBuilder,
+};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, NodeAddOns, PayloadAttributesBuilder, PayloadTypes,
@@ -38,6 +40,8 @@ use std::sync::Arc;
 pub struct ConduitOpNode {
     /// Optimism rollup arguments.
     pub args: RollupArgs,
+    /// Opt in to tracked sender nonce enforcement. Disabled by default; reorgs can lower nonces.
+    pub enforce_tracked_nonce: bool,
     /// CLI historical RPC cutoff, taking precedence over genesis `conduit.migrationBlock`.
     pub historical_rpc_block: Option<u64>,
     /// Data availability configuration for the OP builder.
@@ -71,6 +75,7 @@ impl ConduitOpNode {
         let operator_sdm_opt_in = OperatorSdmOptIn::configured(args.operator_sdm_opt_in);
         Self {
             args,
+            enforce_tracked_nonce: false,
             historical_rpc_block: None,
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
@@ -122,7 +127,7 @@ where
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
-        OpPoolBuilder,
+        ConduitOpPoolBuilder,
         DerivedPayloadServiceBuilder<BasicPayloadServiceBuilder<OpPayloadBuilder>>,
         OpNetworkBuilder,
         ConduitOpExecutorBuilder,
@@ -139,8 +144,8 @@ where
         ComponentsBuilder::default()
             .node_types::<N>()
             .executor(ConduitOpExecutorBuilder)
-            .pool(
-                OpPoolBuilder::default()
+            .pool(ConduitOpPoolBuilder {
+                inner: OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)
                     .with_interop(
                         self.args.interop_http.clone(),
@@ -148,7 +153,8 @@ where
                         self.args.interop_safety_level,
                     )
                     .with_interop_failsafe(self.interop_failsafe.clone()),
-            )
+                enforce_tracked_nonce: self.enforce_tracked_nonce,
+            })
             // Derived attributes must execute before FCU returns. Keep our custom EVM in
             // both the synchronous validation path and the normal payload service.
             .payload(DerivedPayloadServiceBuilder::new(BasicPayloadServiceBuilder::new(

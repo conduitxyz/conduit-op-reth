@@ -41,6 +41,7 @@ pub async fn launch_node(
     args: RollupArgs,
     slipstream_enabled: bool,
     historical_rpc_block: Option<u64>,
+    enforce_tracked_nonce: bool,
 ) -> eyre::Result<(), ErrReport> {
     validate_slipstream_config(&args, slipstream_enabled)?;
     let config = builder.config();
@@ -67,6 +68,7 @@ pub async fn launch_node(
         let flashblocks_enabled = args.flashblocks_url.is_some();
         let mut node = ConduitOpNode::new(args);
         node.historical_rpc_block = historical_rpc_block;
+        node.enforce_tracked_nonce = enforce_tracked_nonce;
         let handle = builder
             .node(node)
             .extend_rpc_modules(move |mut ctx| {
@@ -95,7 +97,15 @@ pub async fn launch_node(
             path.display()
         );
     }
-    launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc_block).await
+    launch_with_proof_history(
+        builder,
+        args,
+        mdbx,
+        slipstream_enabled,
+        historical_rpc_block,
+        enforce_tracked_nonce,
+    )
+    .await
 }
 
 /// Installs the ExEx, RPC overrides, and metrics hook for proof history, then launches the node.
@@ -105,6 +115,7 @@ async fn launch_with_proof_history<S>(
     mdbx: Arc<S>,
     slipstream_enabled: bool,
     historical_rpc_block: Option<u64>,
+    enforce_tracked_nonce: bool,
 ) -> eyre::Result<(), ErrReport>
 where
     S: OpProofsStore + DatabaseMetrics + Send + Sync + 'static,
@@ -118,6 +129,7 @@ where
     let flashblocks_enabled = args.flashblocks_url.is_some();
     let mut node = ConduitOpNode::new(args);
     node.historical_rpc_block = historical_rpc_block;
+    node.enforce_tracked_nonce = enforce_tracked_nonce;
 
     let handle = builder
         .node(node)

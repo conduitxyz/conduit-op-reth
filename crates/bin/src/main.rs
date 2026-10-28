@@ -32,6 +32,13 @@ struct ConduitRollupArgs {
     #[arg(long = "conduit.slipstream")]
     slipstream: bool,
 
+    /// Enforce the pool's tracked sender nonce over older validation snapshots.
+    ///
+    /// Disabled by default. A reorg can lower the canonical nonce, causing valid transactions
+    /// to be rejected until tracked sender state is refreshed. OP sequencers can also reorg.
+    #[arg(long = "txpool.enforce-tracked-nonce")]
+    enforce_tracked_nonce: bool,
+
     /// Forward historical RPC requests below this block, overriding genesis migrationBlock or
     /// Bedrock. The cutoff block itself is served locally; does not change the chain's
     /// hardforks.
@@ -74,8 +81,14 @@ fn main() {
         |builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
          args: ConduitRollupArgs| async move {
             info!(target: "reth::cli", "Launching conduit-op-reth node");
-            launcher::launch_node(builder, args.rollup, args.slipstream, args.historical_rpc_block)
-                .await
+            launcher::launch_node(
+                builder,
+                args.rollup,
+                args.slipstream,
+                args.historical_rpc_block,
+                args.enforce_tracked_nonce,
+            )
+            .await
         },
     ) {
         eprintln!("Error: {err:?}");
@@ -93,6 +106,22 @@ mod tests {
         DefaultRpcModuleValidator,
         ConduitSubCommand,
     >;
+
+    #[test]
+    fn tracked_nonce_enforcement_is_opt_in() {
+        for enabled in [false, true] {
+            let mut args = vec!["conduit-op-reth", "node"];
+            if enabled {
+                args.push("--txpool.enforce-tracked-nonce");
+            }
+            let reth_ethereum_cli::Commands::Node(command) =
+                ConduitCli::try_parse_from(args).unwrap().command
+            else {
+                panic!("expected node command")
+            };
+            assert_eq!(command.ext.enforce_tracked_nonce, enabled);
+        }
+    }
 
     #[test]
     fn historical_rpc_block_flag() {
