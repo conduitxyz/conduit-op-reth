@@ -75,7 +75,7 @@ mod tests {
                 sender: Default::default(),
                 nonce: 0,
                 block_number: 1,
-                flashblock_index: 0,
+                milliblock_index: 0,
             }],
             ..Default::default()
         }

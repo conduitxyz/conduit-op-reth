@@ -13,10 +13,12 @@ feature-depth = 1
 [advisories]
 yanked = "deny"
 ignore = [
-  { id = "RUSTSEC-2024-0436", reason = "paste crate is unmaintained but widely used, no safe upgrade available" },
-  { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained but used transitively by reth, no safe upgrade available" },
-  # Matches upstream Optimism handling: https://github.com/ethereum-optimism/optimism/pull/21274
-  { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is an unmaintained build-time-only transitive dep via alloy-sol-macro; no patched release exists" },
+  { id = "RUSTSEC-2024-0436", reason = "Compile-time macro used by transitive dependencies; maintained replacements require changes to their manifests" },
+  { id = "RUSTSEC-2025-0141", reason = "NippyJar persists headers using bincode 1 encoding; replacement requires storage-format compatibility validation" },
+  { id = "RUSTSEC-2026-0173", reason = "Host procedural macro used by aquamarine in Reth; no compatible proc-macro-error2 update exists" },
+  { id = "RUSTSEC-2026-0391", reason = "Retain op-reth v2.8.0 dependency compatibility; revisit with the next upstream compression dependency update" },
+  { id = "RUSTSEC-2026-0398", reason = "Retain op-reth v2.8.0 dependency compatibility; revisit with the next upstream compression dependency update" },
+  { id = "RUSTSEC-2026-0403", reason = "Retain op-reth v2.8.0 dependency compatibility; revisit with the next upstream compression dependency update" },
 ]
 
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html

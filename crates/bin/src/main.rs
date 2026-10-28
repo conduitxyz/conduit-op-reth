@@ -3,7 +3,7 @@
 mod commands;
 mod version;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use commands::ConduitSubCommand;
 use conduit_op_reth_node::{
     chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser},
@@ -32,11 +32,40 @@ struct ConduitRollupArgs {
     #[arg(long = "conduit.slipstream")]
     slipstream: bool,
 
+    /// Enforce the pool's tracked sender nonce over older validation snapshots.
+    ///
+    /// Disabled by default. A reorg can lower the canonical nonce, causing valid transactions
+    /// to be rejected until tracked sender state is refreshed. OP sequencers can also reorg.
+    #[arg(long = "txpool.enforce-tracked-nonce")]
+    enforce_tracked_nonce: bool,
+
     /// Forward historical RPC requests below this block, overriding genesis migrationBlock or
     /// Bedrock. The cutoff block itself is served locally; does not change the chain's
     /// hardforks.
     #[arg(long = "rollup.historicalrpc.block", value_name = "BLOCK", requires = "historical_rpc")]
     historical_rpc_block: Option<u64>,
+}
+
+type ConduitCli =
+    Cli<ConduitOpChainSpecParser, ConduitRollupArgs, DefaultRpcModuleValidator, ConduitSubCommand>;
+
+/// Expose only Milliblocks flags. IDs identify fields for upstream decoding, not CLI aliases.
+fn cli_command() -> clap::Command {
+    ConduitCli::command().mut_subcommand("node", |node| {
+        node.mut_arg("flashblocks_url", |arg| {
+            arg.long("milliblocks-url")
+                .alias(None)
+                .value_name("URL")
+                .help("WebSocket URL providing milliblocks for pending state")
+                .long_help("WebSocket URL providing milliblocks. Requests using the pending block tag observe the streamed preconfirmed state.")
+        })
+        .mut_arg("flashblock_consensus", |arg| {
+            arg.long("milliblock-consensus")
+                .alias(None)
+                .help("Advance the chain using the milliblock consensus client")
+                .long_help("Process milliblock sequences through the Engine API to advance the chain. Requires --milliblocks-url.")
+        })
+    })
 }
 
 #[global_allocator]
@@ -48,27 +77,36 @@ fn main() {
     // Initialize conduit-op-reth version metadata before CLI parsing
     init_conduit_version().expect("Failed to initialize conduit-op-reth version metadata");
 
+    // Match op-reth: masked state persistence is not supported for OP nodes. The launcher
+    // also rejects a nonzero effective window supplied explicitly by an operator.
+    reth_node_core::args::DefaultEngineValues::default()
+        .with_num_state_masking_blocks(0)
+        .try_init()
+        .expect("engine defaults must be initialized before CLI parsing");
+
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe {
             std::env::set_var("RUST_BACKTRACE", "1");
         }
     }
 
-    if let Err(err) = Cli::<
-        ConduitOpChainSpecParser,
-        ConduitRollupArgs,
-        DefaultRpcModuleValidator,
-        ConduitSubCommand,
-    >::parse()
-    .run_with_components::<ConduitOpNode>(
+    let cli = ConduitCli::from_arg_matches(&cli_command().get_matches())
+        .unwrap_or_else(|error| error.exit());
+    if let Err(err) = cli.run_with_components::<ConduitOpNode>(
         |spec: Arc<ConduitOpChainSpec>| {
             (ConduitOpEvmConfig::new(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
         },
         |builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
          args: ConduitRollupArgs| async move {
             info!(target: "reth::cli", "Launching conduit-op-reth node");
-            launcher::launch_node(builder, args.rollup, args.slipstream, args.historical_rpc_block)
-                .await
+            launcher::launch_node(
+                builder,
+                args.rollup,
+                args.slipstream,
+                args.historical_rpc_block,
+                args.enforce_tracked_nonce,
+            )
+            .await
         },
     ) {
         eprintln!("Error: {err:?}");
@@ -79,13 +117,76 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
-    type ConduitCli = Cli<
-        ConduitOpChainSpecParser,
-        ConduitRollupArgs,
-        DefaultRpcModuleValidator,
-        ConduitSubCommand,
-    >;
+    #[test]
+    fn milliblock_options_preserve_upstream_wiring_without_legacy_aliases() {
+        for consensus in [false, true] {
+            let mut args =
+                vec!["conduit-op-reth", "node", "--milliblocks-url", "ws://127.0.0.1:1234"];
+            if consensus {
+                args.push("--milliblock-consensus");
+            }
+            let matches = cli_command().try_get_matches_from(args).unwrap();
+            let reth_ethereum_cli::Commands::Node(command) =
+                ConduitCli::from_arg_matches(&matches).unwrap().command
+            else {
+                panic!("expected node command")
+            };
+            assert_eq!(
+                command.ext.rollup.flashblocks_url.unwrap().as_str(),
+                "ws://127.0.0.1:1234/"
+            );
+            assert_eq!(command.ext.rollup.flashblock_consensus, consensus);
+        }
+        for legacy_flag in [
+            "--flashblocks-url",
+            "--flashblock-consensus",
+            "--subblocks-url",
+            "--subblocks-consensus",
+            "--websocket-url",
+        ] {
+            let error = cli_command()
+                .try_get_matches_from([
+                    "conduit-op-reth",
+                    "node",
+                    "--milliblocks-url",
+                    "ws://127.0.0.1:1234",
+                    legacy_flag,
+                ])
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+        let error = cli_command()
+            .try_get_matches_from(["conduit-op-reth", "node", "--milliblock-consensus"])
+            .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--milliblocks-url"));
+        let mut command = cli_command();
+        let node = command.find_subcommand_mut("node").unwrap();
+        for help in [node.render_help(), node.render_long_help()] {
+            let help = help.to_string();
+            assert!(help.contains("--milliblocks-url"));
+            assert!(help.contains("--milliblock-consensus"));
+            assert!(!help.to_lowercase().contains("flashblock"));
+        }
+    }
+
+    #[test]
+    fn tracked_nonce_enforcement_is_opt_in() {
+        for enabled in [false, true] {
+            let mut args = vec!["conduit-op-reth", "node"];
+            if enabled {
+                args.push("--txpool.enforce-tracked-nonce");
+            }
+            let reth_ethereum_cli::Commands::Node(command) =
+                ConduitCli::try_parse_from(args).unwrap().command
+            else {
+                panic!("expected node command")
+            };
+            assert_eq!(command.ext.enforce_tracked_nonce, enabled);
+        }
+    }
 
     #[test]
     fn historical_rpc_block_flag() {
@@ -194,10 +295,21 @@ mod tests {
             "--proofs-history.verification-interval",
             "1",
             "--proofs-history.storage-version",
-            "v1",
+            "v2",
         ];
         <ConduitCli as clap::Parser>::try_parse_from(node_args)
             .expect("node proofs-history flags must parse");
+
+        for command in [vec!["node"], vec!["proofs", "init"]] {
+            let error = ConduitCli::try_parse_from(
+                ["conduit-op-reth"]
+                    .into_iter()
+                    .chain(command)
+                    .chain(["--proofs-history.storage-version", "v1"]),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("only `v2` is supported"));
+        }
     }
 
     #[test]

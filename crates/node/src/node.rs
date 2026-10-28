@@ -1,4 +1,6 @@
-use crate::{chainspec::ConduitOpChainSpec, evm::ConduitOpExecutorBuilder};
+use crate::{
+    chainspec::ConduitOpChainSpec, evm::ConduitOpExecutorBuilder, pool::ConduitOpPoolBuilder,
+};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, NodeAddOns, PayloadAttributesBuilder, PayloadTypes,
@@ -12,7 +14,7 @@ use reth_node_builder::{
     },
 };
 use reth_optimism_node::{
-    OpDAConfig, OpEngineApiBuilder, OpEngineTypes, OpStorage,
+    DerivedPayloadServiceBuilder, OpDAConfig, OpEngineApiBuilder, OpEngineTypes, OpStorage,
     args::RollupArgs,
     node::{
         OpAddOns, OpAddOnsBuilder, OpConsensusBuilder, OpEngineValidatorBuilder, OpFullNodeTypes,
@@ -38,6 +40,8 @@ use std::sync::Arc;
 pub struct ConduitOpNode {
     /// Optimism rollup arguments.
     pub args: RollupArgs,
+    /// Opt in to tracked sender nonce enforcement. Disabled by default; reorgs can lower nonces.
+    pub enforce_tracked_nonce: bool,
     /// CLI historical RPC cutoff, taking precedence over genesis `conduit.migrationBlock`.
     pub historical_rpc_block: Option<u64>,
     /// Data availability configuration for the OP builder.
@@ -71,6 +75,7 @@ impl ConduitOpNode {
         let operator_sdm_opt_in = OperatorSdmOptIn::configured(args.operator_sdm_opt_in);
         Self {
             args,
+            enforce_tracked_nonce: false,
             historical_rpc_block: None,
             da_config: OpDAConfig::default(),
             gas_limit_config: OpGasLimitConfig::default(),
@@ -122,8 +127,8 @@ where
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
-        OpPoolBuilder,
-        BasicPayloadServiceBuilder<OpPayloadBuilder>,
+        ConduitOpPoolBuilder,
+        DerivedPayloadServiceBuilder<BasicPayloadServiceBuilder<OpPayloadBuilder>>,
         OpNetworkBuilder,
         ConduitOpExecutorBuilder,
         OpConsensusBuilder,
@@ -139,8 +144,8 @@ where
         ComponentsBuilder::default()
             .node_types::<N>()
             .executor(ConduitOpExecutorBuilder)
-            .pool(
-                OpPoolBuilder::default()
+            .pool(ConduitOpPoolBuilder {
+                inner: OpPoolBuilder::default()
                     .with_enable_tx_conditional(self.args.enable_tx_conditional)
                     .with_interop(
                         self.args.interop_http.clone(),
@@ -148,11 +153,14 @@ where
                         self.args.interop_safety_level,
                     )
                     .with_interop_failsafe(self.interop_failsafe.clone()),
-            )
-            .payload(BasicPayloadServiceBuilder::new(
+                enforce_tracked_nonce: self.enforce_tracked_nonce,
+            })
+            // Derived attributes must execute before FCU returns. Keep our custom EVM in
+            // both the synchronous validation path and the normal payload service.
+            .payload(DerivedPayloadServiceBuilder::new(BasicPayloadServiceBuilder::new(
                 OpPayloadBuilder::new(compute_pending_block)
                     .with_builder_config(self.builder_config()),
-            ))
+            )))
             .network(OpNetworkBuilder::new(disable_txpool_gossip, !discovery_v4))
             .consensus(OpConsensusBuilder::default())
     }
@@ -299,7 +307,9 @@ mod tests {
     use alloy_eips::{Decodable2718, Encodable2718};
     use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
     use op_alloy_consensus::TxDeposit;
-    use op_alloy_rpc_types_engine::{OpPayloadAttributes, flashblock::OpFlashblockPayload};
+    use op_alloy_rpc_types_engine::{
+        OpPayloadAttributes, flashblock::OpFlashblockPayload as OpMilliblockPayload,
+    };
     use reth_optimism_payload_builder::OpPayloadBuilderAttributes;
     use reth_primitives_traits::NodePrimitives;
 
@@ -345,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn payloads_and_flashblocks_reject_unprefixed_deposits() {
+    fn payloads_and_milliblocks_reject_unprefixed_deposits() {
         let canonical = deposit().encoded_2718();
         let bare = canonical[1..].to_vec();
         let mut trailing = canonical.clone();
@@ -362,12 +372,12 @@ mod tests {
             let built = OpPayloadBuilderAttributes::<Tx>::try_new(B256::ZERO, attrs, 3);
             assert_eq!(built.is_ok(), valid, "builder: {bytes}");
 
-            let mut flashblock = OpFlashblockPayload::default();
-            flashblock.diff.transactions = vec![bytes.clone()];
-            let streamed = flashblock.decoded_transaction::<Tx>().next().unwrap();
-            assert_eq!(streamed.is_ok(), valid, "flashblock: {bytes}");
-            let recovered = flashblock.recover_transactions::<Tx>().next().unwrap();
-            assert_eq!(recovered.is_ok(), valid, "flashblock recovery: {bytes}");
+            let mut milliblock = OpMilliblockPayload::default();
+            milliblock.diff.transactions = vec![bytes.clone()];
+            let streamed = milliblock.decoded_transaction::<Tx>().next().unwrap();
+            assert_eq!(streamed.is_ok(), valid, "milliblock: {bytes}");
+            let recovered = milliblock.recover_transactions::<Tx>().next().unwrap();
+            assert_eq!(recovered.is_ok(), valid, "milliblock recovery: {bytes}");
             if valid {
                 assert_eq!(decoded.unwrap().encoded_2718().as_slice(), bytes.as_ref());
                 assert_eq!(streamed.unwrap().encoded_2718().as_slice(), bytes.as_ref());
