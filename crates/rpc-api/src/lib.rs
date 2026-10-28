@@ -19,7 +19,7 @@ pub const SEND_RAW_TRANSACTION_BATCH_WITH_HINTS_METHOD: &str =
 /// Method name for [`SlipstreamApiServer::warm_hints`].
 pub const WARM_HINTS_METHOD: &str = "slipstream_warmHints";
 
-/// A transaction executed into a published flashblock.
+/// A transaction executed into a published milliblock.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SlipstreamIncludedTx {
     pub index: usize,
@@ -27,7 +27,9 @@ pub struct SlipstreamIncludedTx {
     pub sender: Address,
     pub nonce: u64,
     pub block_number: u64,
-    pub flashblock_index: u64,
+    /// Keeps the established wire key for existing builders and clients.
+    #[serde(rename = "flashblock_index")]
+    pub milliblock_index: u64,
 }
 
 /// A transaction that is invalid as submitted.
@@ -71,7 +73,7 @@ pub struct SlipstreamHintedTx {
 /// Public Slipstream batch-submission API implemented by G3 rbuilder nodes.
 #[rpc(server, namespace = "slipstream")]
 pub trait SlipstreamApi {
-    /// Submits signed transactions for the next flashblock and returns one
+    /// Submits signed transactions for the next milliblock and returns one
     /// execution verdict per input transaction.
     #[method(name = "sendRawTransactionBatch")]
     async fn send_raw_transaction_batch(&self, txs: Vec<Bytes>) -> RpcResult<SlipstreamBatchAck>;
@@ -138,6 +140,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(ack.included[0].index, 0);
+        assert_eq!(ack.included[0].milliblock_index, 5);
+        let encoded = serde_json::to_value(&ack).unwrap();
+        assert_eq!(encoded["included"][0]["flashblock_index"], 5);
+        assert!(encoded["included"][0].get("milliblock_index").is_none());
         assert_eq!(ack.rejected[0].error, "invalid");
         assert_eq!(ack.retry[0].reason, "mailbox-full");
     }

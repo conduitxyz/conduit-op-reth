@@ -35,6 +35,17 @@ make dev
 
 This builds a debug binary, clears any previous state, and starts the node using the Saigon test genesis.
 
+### Milliblocks
+
+Use `--milliblocks-url <URL>` to receive streamed preconfirmations for pending-state
+RPC requests. Add `--milliblock-consensus` when the stream should also advance the
+chain through the Engine API. Both options configure the existing upstream client.
+
+Legacy CLI spellings remain hidden aliases, so existing node configurations still
+start. Slipstream response keys remain unchanged for existing builders and clients.
+Conduit-owned code and log messages use milliblocks; upstream dependency symbols,
+metrics, and log messages retain their upstream names.
+
 ### Optional tracked nonce enforcement
 
 `conduit-op-reth node --txpool.enforce-tracked-nonce` enables Reth's

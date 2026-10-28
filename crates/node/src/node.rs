@@ -307,7 +307,9 @@ mod tests {
     use alloy_eips::{Decodable2718, Encodable2718};
     use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
     use op_alloy_consensus::TxDeposit;
-    use op_alloy_rpc_types_engine::{OpPayloadAttributes, flashblock::OpFlashblockPayload};
+    use op_alloy_rpc_types_engine::{
+        OpPayloadAttributes, flashblock::OpFlashblockPayload as OpMilliblockPayload,
+    };
     use reth_optimism_payload_builder::OpPayloadBuilderAttributes;
     use reth_primitives_traits::NodePrimitives;
 
@@ -353,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn payloads_and_flashblocks_reject_unprefixed_deposits() {
+    fn payloads_and_milliblocks_reject_unprefixed_deposits() {
         let canonical = deposit().encoded_2718();
         let bare = canonical[1..].to_vec();
         let mut trailing = canonical.clone();
@@ -370,12 +372,12 @@ mod tests {
             let built = OpPayloadBuilderAttributes::<Tx>::try_new(B256::ZERO, attrs, 3);
             assert_eq!(built.is_ok(), valid, "builder: {bytes}");
 
-            let mut flashblock = OpFlashblockPayload::default();
-            flashblock.diff.transactions = vec![bytes.clone()];
-            let streamed = flashblock.decoded_transaction::<Tx>().next().unwrap();
-            assert_eq!(streamed.is_ok(), valid, "flashblock: {bytes}");
-            let recovered = flashblock.recover_transactions::<Tx>().next().unwrap();
-            assert_eq!(recovered.is_ok(), valid, "flashblock recovery: {bytes}");
+            let mut milliblock = OpMilliblockPayload::default();
+            milliblock.diff.transactions = vec![bytes.clone()];
+            let streamed = milliblock.decoded_transaction::<Tx>().next().unwrap();
+            assert_eq!(streamed.is_ok(), valid, "milliblock: {bytes}");
+            let recovered = milliblock.recover_transactions::<Tx>().next().unwrap();
+            assert_eq!(recovered.is_ok(), valid, "milliblock recovery: {bytes}");
             if valid {
                 assert_eq!(decoded.unwrap().encoded_2718().as_slice(), bytes.as_ref());
                 assert_eq!(streamed.unwrap().encoded_2718().as_slice(), bytes.as_ref());

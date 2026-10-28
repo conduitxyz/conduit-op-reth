@@ -3,7 +3,7 @@
 mod commands;
 mod version;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use commands::ConduitSubCommand;
 use conduit_op_reth_node::{
     chainspec::{ConduitOpChainSpec, ConduitOpChainSpecParser},
@@ -46,6 +46,28 @@ struct ConduitRollupArgs {
     historical_rpc_block: Option<u64>,
 }
 
+type ConduitCli =
+    Cli<ConduitOpChainSpecParser, ConduitRollupArgs, DefaultRpcModuleValidator, ConduitSubCommand>;
+
+/// Present Conduit's terminology while retaining upstream argument IDs for decoding.
+fn cli_command() -> clap::Command {
+    ConduitCli::command().mut_subcommand("node", |node| {
+        node.mut_arg("flashblocks_url", |arg| {
+            arg.long("milliblocks-url")
+                .alias("flashblocks-url")
+                .value_name("URL")
+                .help("WebSocket URL providing milliblocks for pending state")
+                .long_help("WebSocket URL providing milliblocks. Requests using the pending block tag observe the streamed preconfirmed state.")
+        })
+        .mut_arg("flashblock_consensus", |arg| {
+            arg.long("milliblock-consensus")
+                .alias("flashblock-consensus")
+                .help("Advance the chain using the milliblock consensus client")
+                .long_help("Process milliblock sequences through the Engine API to advance the chain. Requires --milliblocks-url.")
+        })
+    })
+}
+
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
@@ -68,13 +90,9 @@ fn main() {
         }
     }
 
-    if let Err(err) = Cli::<
-        ConduitOpChainSpecParser,
-        ConduitRollupArgs,
-        DefaultRpcModuleValidator,
-        ConduitSubCommand,
-    >::parse()
-    .run_with_components::<ConduitOpNode>(
+    let cli = ConduitCli::from_arg_matches(&cli_command().get_matches())
+        .unwrap_or_else(|error| error.exit());
+    if let Err(err) = cli.run_with_components::<ConduitOpNode>(
         |spec: Arc<ConduitOpChainSpec>| {
             (ConduitOpEvmConfig::new(spec.clone()), Arc::new(OpBeaconConsensus::new(spec)))
         },
@@ -99,13 +117,50 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
-    type ConduitCli = Cli<
-        ConduitOpChainSpecParser,
-        ConduitRollupArgs,
-        DefaultRpcModuleValidator,
-        ConduitSubCommand,
-    >;
+    #[test]
+    fn milliblock_options_preserve_upstream_wiring_and_legacy_aliases() {
+        for (url_flag, consensus_flag) in [
+            ("--milliblocks-url", "--milliblock-consensus"),
+            ("--flashblocks-url", "--flashblock-consensus"),
+            ("--subblocks-url", "--subblocks-consensus"),
+            ("--websocket-url", "--milliblock-consensus"),
+        ] {
+            let matches = cli_command()
+                .try_get_matches_from([
+                    "conduit-op-reth",
+                    "node",
+                    url_flag,
+                    "ws://127.0.0.1:1234",
+                    consensus_flag,
+                ])
+                .unwrap();
+            let reth_ethereum_cli::Commands::Node(command) =
+                ConduitCli::from_arg_matches(&matches).unwrap().command
+            else {
+                panic!("expected node command")
+            };
+            assert_eq!(
+                command.ext.rollup.flashblocks_url.unwrap().as_str(),
+                "ws://127.0.0.1:1234/"
+            );
+            assert!(command.ext.rollup.flashblock_consensus);
+        }
+        let error = cli_command()
+            .try_get_matches_from(["conduit-op-reth", "node", "--milliblock-consensus"])
+            .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(error.to_string().contains("--milliblocks-url"));
+        let mut command = cli_command();
+        let node = command.find_subcommand_mut("node").unwrap();
+        for help in [node.render_help(), node.render_long_help()] {
+            let help = help.to_string();
+            assert!(help.contains("--milliblocks-url"));
+            assert!(help.contains("--milliblock-consensus"));
+            assert!(!help.to_lowercase().contains("flashblock"));
+        }
+    }
 
     #[test]
     fn tracked_nonce_enforcement_is_opt_in() {

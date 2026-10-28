@@ -1,18 +1,18 @@
-//! `eth_call`, `eth_estimateGas` and `eth_simulateV1` overrides that serve flashblock
+//! `eth_call`, `eth_estimateGas` and `eth_simulateV1` overrides that serve milliblock
 //! pending state.
 //!
 //! The stock reth implementations of these methods resolve the `pending` block tag via
 //! `evm_env_at`, which falls back to the latest canonical block when the provider has no
-//! pending block (always the case for flashblocks, which only populate an RPC-level
+//! pending block (always the case for milliblocks, which only populate an RPC-level
 //! overlay). As a result, `eth_call(..., "pending")` executes against canonical state and
 //! does not observe preconfirmed transactions, unlike `eth_getBalance`,
 //! `eth_getStorageAt`, `eth_getTransactionReceipt` and `eth_sendRawTransactionSync`,
-//! which all consult the flashblock overlay.
+//! which all consult the milliblock overlay.
 //!
-//! This module follows the approach used by Base's node (base/base `flashblocks` crate):
-//! when the request targets the `pending` tag and a pending flashblock exists, the
-//! flashblock's accumulated [`BundleState`] is converted into a [`StateOverride`] and the
-//! request is delegated to the inner eth API pinned to the flashblock's canonical anchor
+//! This module follows the pending-state approach used by Base's node:
+//! when the request targets the `pending` tag and a pending milliblock exists, the
+//! milliblock's accumulated [`BundleState`] is converted into a [`StateOverride`] and the
+//! request is delegated to the inner eth API pinned to the milliblock's canonical anchor
 //! block, with user-supplied overrides applied on top.
 
 use alloy_consensus::BlockHeader;
@@ -37,48 +37,48 @@ use reth_rpc_eth_api::{
 use reth_rpc_eth_types::{EthApiError, simulate::EthSimulateError};
 use tracing::trace;
 
-/// Provides the state of the current pending flashblock as a [`StateOverride`] anchored
+/// Provides the state of the current pending milliblock as a [`StateOverride`] anchored
 /// on a canonical block.
-pub trait PendingFlashblockState: Send + Sync {
-    /// Returns, for the current pending flashblock (or `None` when none exists):
+pub trait PendingMilliblockState: Send + Sync {
+    /// Returns, for the current pending milliblock (or `None` when none exists):
     /// - the canonical anchor block the state reads resolve against (block N-1),
-    /// - the accumulated state overrides representing the flashblock's preconfirmed state,
+    /// - the accumulated state overrides representing the milliblock's preconfirmed state,
     /// - the block-environment overrides for the block being built (block N), so
     ///   `NUMBER`/`TIMESTAMP`/`BASEFEE`/`COINBASE`/`PREVRANDAO` match what a transaction included
-    ///   in the flashblock actually executes under.
-    fn pending_flashblock_overrides(
+    ///   in the milliblock actually executes under.
+    fn pending_milliblock_overrides(
         &self,
     ) -> impl Future<Output = Option<(BlockId, StateOverride, BlockOverrides)>> + Send;
 }
 
-impl<N, Rpc> PendingFlashblockState for OpEthApi<N, Rpc>
+impl<N, Rpc> PendingMilliblockState for OpEthApi<N, Rpc>
 where
     N: RpcNodeCore,
     OpEthApiError: FromEvmError<N::Evm>,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = OpEthApiError>,
 {
-    async fn pending_flashblock_overrides(
+    async fn pending_milliblock_overrides(
         &self,
     ) -> Option<(BlockId, StateOverride, BlockOverrides)> {
-        let flashblock = self.pending_flashblock().await.ok().flatten()?;
+        let milliblock = self.pending_flashblock().await.ok().flatten()?;
         let overrides =
-            bundle_state_overrides(&flashblock.pending.executed_block.execution_output.state);
-        let header = flashblock.pending.executed_block.recovered_block.header();
+            bundle_state_overrides(&milliblock.pending.executed_block.execution_output.state);
+        let header = milliblock.pending.executed_block.recovered_block.header();
 
         // Anchor *state* reads on the canonical parent block (N-1), matching Base's
         // implementation. Keeping the anchor at N-1 also means `BLOCKHASH(N-1)` resolves
         // to the parent's canonical hash.
         //
         // Possible future improvement: anchor on the exact block hash
-        // (`flashblock.canonical_anchor_hash`) instead, which pins the overrides to the
-        // block the flashblock was actually built on and fails closed during reorg
+        // (`milliblock.canonical_anchor_hash`) instead, which pins the overrides to the
+        // block the milliblock was actually built on and fails closed during reorg
         // races where two parents can share the same height.
         let anchor_number = header.number().saturating_sub(1);
 
         // ...but run the call in the *pending* block's environment (block N). Without this,
         // the call executes in block N-1's context, so `block.number` / `block.timestamp` /
         // basefee / coinbase / prevrandao diverge from what a transaction included in the
-        // flashblock (block N) actually sees. Build the env from the flashblock's own header.
+        // milliblock (block N) actually sees. Build the env from the milliblock's own header.
         let block_env = BlockOverrides {
             number: Some(U256::from(header.number())),
             time: Some(header.timestamp()),
@@ -93,8 +93,8 @@ where
     }
 }
 
-/// Converts a flashblock's accumulated [`BundleState`] into a [`StateOverride`] that can
-/// be applied on top of the flashblock's canonical anchor block.
+/// Converts a milliblock's accumulated [`BundleState`] into a [`StateOverride`] that can
+/// be applied on top of the milliblock's canonical anchor block.
 ///
 /// Accounts override balance, nonce, changed storage slots and (for newly deployed
 /// contracts) code, mirroring how Base's node builds its pending state overrides.
@@ -146,10 +146,10 @@ pub fn bundle_state_overrides(bundle: &BundleState) -> StateOverride {
     overrides
 }
 
-// Namespace overrides serving flashblock pending state for call-like methods.
+// Namespace overrides serving milliblock pending state for call-like methods.
 #[cfg_attr(not(test), rpc(server, namespace = "eth"))]
 #[cfg_attr(test, rpc(server, client, namespace = "eth"))]
-pub trait FlashblocksCallApi<TxReq: RpcObject, B: RpcObject> {
+pub trait MilliblocksCallApi<TxReq: RpcObject, B: RpcObject> {
     #[method(name = "call")]
     async fn call(
         &self,
@@ -177,36 +177,36 @@ pub trait FlashblocksCallApi<TxReq: RpcObject, B: RpcObject> {
 }
 
 /// RPC extension that overrides `eth_call`, `eth_estimateGas` and `eth_simulateV1` so
-/// the `pending` block tag observes flashblock state.
+/// the `pending` block tag observes milliblock state.
 #[derive(Debug, Clone)]
-pub struct FlashblocksCallExt<Eth> {
+pub struct MilliblocksCallExt<Eth> {
     eth_api: Eth,
 }
 
-impl<Eth> FlashblocksCallExt<Eth> {
+impl<Eth> MilliblocksCallExt<Eth> {
     pub const fn new(eth_api: Eth) -> Self {
         Self { eth_api }
     }
 
-    /// Resolves the effective block id and flashblock state overrides for a request.
+    /// Resolves the effective block id and milliblock state overrides for a request.
     ///
-    /// For the `pending` tag with an available flashblock this returns the canonical
-    /// anchor block id and the flashblock overrides; otherwise the request passes
+    /// For the `pending` tag with an available milliblock this returns the canonical
+    /// anchor block id and the milliblock overrides; otherwise the request passes
     /// through unchanged.
     async fn resolve_pending(
         &self,
         block_number: Option<BlockId>,
     ) -> (Option<BlockId>, Option<StateOverride>, Option<BlockOverrides>)
     where
-        Eth: PendingFlashblockState,
+        Eth: PendingMilliblockState,
     {
         let block_id = block_number.unwrap_or_default();
         if !block_id.is_pending() {
             return (block_number, None, None);
         }
-        match self.eth_api.pending_flashblock_overrides().await {
+        match self.eth_api.pending_milliblock_overrides().await {
             Some((anchor, overrides, block_overrides)) => {
-                trace!(target: "rpc::flashblocks", ?anchor, "serving pending call from flashblock state");
+                trace!(target: "rpc::milliblocks", ?anchor, "serving pending call from milliblock state");
                 (Some(anchor), Some(overrides), Some(block_overrides))
             }
             None => (block_number, None, None),
@@ -214,60 +214,60 @@ impl<Eth> FlashblocksCallExt<Eth> {
     }
 }
 
-/// Merges the flashblock's block-environment overrides (block N) with user-supplied block
+/// Merges the milliblock's block-environment overrides (block N) with user-supplied block
 /// overrides. User-supplied fields win per field, mirroring [`merge_overrides`] for state.
 fn merge_block_overrides(
-    flashblock: Option<BlockOverrides>,
+    milliblock: Option<BlockOverrides>,
     user: Option<BlockOverrides>,
 ) -> Option<BlockOverrides> {
-    match (flashblock, user) {
+    match (milliblock, user) {
         (None, user) => user,
-        (Some(flashblock), None) => Some(flashblock),
-        (Some(flashblock), Some(mut user)) => {
-            user.number = user.number.or(flashblock.number);
-            user.time = user.time.or(flashblock.time);
-            user.gas_limit = user.gas_limit.or(flashblock.gas_limit);
-            user.coinbase = user.coinbase.or(flashblock.coinbase);
-            user.random = user.random.or(flashblock.random);
-            user.base_fee = user.base_fee.or(flashblock.base_fee);
+        (Some(milliblock), None) => Some(milliblock),
+        (Some(milliblock), Some(mut user)) => {
+            user.number = user.number.or(milliblock.number);
+            user.time = user.time.or(milliblock.time);
+            user.gas_limit = user.gas_limit.or(milliblock.gas_limit);
+            user.coinbase = user.coinbase.or(milliblock.coinbase);
+            user.random = user.random.or(milliblock.random);
+            user.base_fee = user.base_fee.or(milliblock.base_fee);
             Some(user)
         }
     }
 }
 
-/// Merges flashblock state overrides with user-supplied overrides.
+/// Merges milliblock state overrides with user-supplied overrides.
 ///
-/// User overrides win per account, mirroring the behavior of Base's flashblocks RPC.
+/// User overrides win per account, mirroring the behavior of Base's pending-state RPC.
 fn merge_overrides(
-    flashblock: Option<StateOverride>,
+    milliblock: Option<StateOverride>,
     user: Option<StateOverride>,
 ) -> Option<StateOverride> {
-    match (flashblock, user) {
+    match (milliblock, user) {
         (None, user) => user,
-        (Some(flashblock), user) => {
-            Some(StateOverridesBuilder::new(flashblock).extend(user.unwrap_or_default()).build())
+        (Some(milliblock), user) => {
+            Some(StateOverridesBuilder::new(milliblock).extend(user.unwrap_or_default()).build())
         }
     }
 }
 
-/// Applies the flashblock's pending state only to the first simulated block.
+/// Applies the milliblock's pending state only to the first simulated block.
 ///
 /// `eth_simulateV1` executes all requested blocks on a single mutable state, so reapplying
-/// the flashblock base to later blocks would overwrite changes produced by earlier simulated
+/// the milliblock base to later blocks would overwrite changes produced by earlier simulated
 /// blocks. User overrides on later blocks are still forwarded unchanged.
 fn merge_simulate_state_overrides(
     index: usize,
-    flashblock: &StateOverride,
+    milliblock: &StateOverride,
     user: Option<StateOverride>,
 ) -> Option<StateOverride> {
-    if index == 0 { merge_overrides(Some(flashblock.clone()), user) } else { user }
+    if index == 0 { merge_overrides(Some(milliblock.clone()), user) } else { user }
 }
 
 #[async_trait]
-impl<Eth> FlashblocksCallApiServer<RpcTxReq<Eth::NetworkTypes>, RpcBlock<Eth::NetworkTypes>>
-    for FlashblocksCallExt<Eth>
+impl<Eth> MilliblocksCallApiServer<RpcTxReq<Eth::NetworkTypes>, RpcBlock<Eth::NetworkTypes>>
+    for MilliblocksCallExt<Eth>
 where
-    Eth: FullEthApi + PendingFlashblockState + Clone + 'static,
+    Eth: FullEthApi + PendingMilliblockState + Clone + 'static,
 {
     async fn call(
         &self,
@@ -276,11 +276,11 @@ where
         state_overrides: Option<StateOverride>,
         block_overrides: Option<Box<BlockOverrides>>,
     ) -> RpcResult<Bytes> {
-        let (block_id, flashblock_overrides, flashblock_block_overrides) =
+        let (block_id, milliblock_overrides, milliblock_block_overrides) =
             self.resolve_pending(block_number).await;
-        let state_overrides = merge_overrides(flashblock_overrides, state_overrides);
+        let state_overrides = merge_overrides(milliblock_overrides, state_overrides);
         let block_overrides =
-            merge_block_overrides(flashblock_block_overrides, block_overrides.map(|b| *b))
+            merge_block_overrides(milliblock_block_overrides, block_overrides.map(|b| *b))
                 .map(Box::new);
 
         EthCall::call(
@@ -300,11 +300,11 @@ where
         state_override: Option<StateOverride>,
         block_overrides: Option<Box<BlockOverrides>>,
     ) -> RpcResult<U256> {
-        let (block_id, flashblock_overrides, flashblock_block_overrides) =
+        let (block_id, milliblock_overrides, milliblock_block_overrides) =
             self.resolve_pending(block_number).await;
-        let state_override = merge_overrides(flashblock_overrides, state_override);
+        let state_override = merge_overrides(milliblock_overrides, state_override);
         let block_overrides =
-            merge_block_overrides(flashblock_block_overrides, block_overrides.map(|b| *b))
+            merge_block_overrides(milliblock_block_overrides, block_overrides.map(|b| *b))
                 .map(Box::new);
 
         EthCall::estimate_gas_at(
@@ -326,14 +326,14 @@ where
             return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into());
         }
 
-        let (block_id, flashblock_overrides, flashblock_block_overrides) =
+        let (block_id, milliblock_overrides, milliblock_block_overrides) =
             self.resolve_pending(block_number).await;
 
-        // Apply the flashblock state and pending block environment to the first simulated
+        // Apply the milliblock state and pending block environment to the first simulated
         // block only. `simulate_v1` carries the resulting state forward and auto-increments
         // the environment for subsequent blocks, so reapplying either base would break the
         // simulated chain's continuity.
-        let opts = match flashblock_overrides {
+        let opts = match milliblock_overrides {
             Some(overrides) => {
                 let block_state_calls = opts
                     .block_state_calls
@@ -347,7 +347,7 @@ where
                         );
                         let block_overrides = if i == 0 {
                             merge_block_overrides(
-                                flashblock_block_overrides.clone(),
+                                milliblock_block_overrides.clone(),
                                 sim_block.block_overrides,
                             )
                         } else {
@@ -483,36 +483,36 @@ mod tests {
 
     #[test]
     fn user_overrides_win_per_account() {
-        let mut flashblock = StateOverride::default();
-        flashblock.entry(ADDR).or_default().balance = Some(U256::from(1));
+        let mut milliblock = StateOverride::default();
+        milliblock.entry(ADDR).or_default().balance = Some(U256::from(1));
 
         let mut user = StateOverride::default();
         user.entry(ADDR).or_default().balance = Some(U256::from(2));
 
-        let merged = merge_overrides(Some(flashblock), Some(user)).unwrap();
+        let merged = merge_overrides(Some(milliblock), Some(user)).unwrap();
         assert_eq!(merged.get(&ADDR).unwrap().balance, Some(U256::from(2)));
     }
 
     #[test]
-    fn simulate_state_overrides_apply_flashblock_only_to_first_block() {
-        let mut flashblock = StateOverride::default();
-        flashblock.entry(ADDR).or_default().balance = Some(U256::from(10));
+    fn simulate_state_overrides_apply_milliblock_only_to_first_block() {
+        let mut milliblock = StateOverride::default();
+        milliblock.entry(ADDR).or_default().balance = Some(U256::from(10));
 
-        let first = merge_simulate_state_overrides(0, &flashblock, None).unwrap();
+        let first = merge_simulate_state_overrides(0, &milliblock, None).unwrap();
         assert_eq!(first.get(&ADDR).unwrap().balance, Some(U256::from(10)));
 
         let mut later_user = StateOverride::default();
         later_user.entry(ADDR).or_default().nonce = Some(3);
-        let later = merge_simulate_state_overrides(1, &flashblock, Some(later_user)).unwrap();
+        let later = merge_simulate_state_overrides(1, &milliblock, Some(later_user)).unwrap();
         let account = later.get(&ADDR).unwrap();
-        assert_eq!(account.balance, None, "later blocks must not reapply flashblock state");
+        assert_eq!(account.balance, None, "later blocks must not reapply milliblock state");
         assert_eq!(account.nonce, Some(3), "later user overrides are preserved");
-        assert!(merge_simulate_state_overrides(1, &flashblock, None).is_none());
+        assert!(merge_simulate_state_overrides(1, &milliblock, None).is_none());
     }
 
     #[test]
-    fn merge_block_overrides_passes_through_when_no_flashblock() {
-        // No flashblock env: whatever the user supplied (including nothing) is returned.
+    fn merge_block_overrides_passes_through_when_no_milliblock() {
+        // No milliblock env: whatever the user supplied (including nothing) is returned.
         assert!(merge_block_overrides(None, None).is_none());
 
         let user = BlockOverrides { number: Some(U256::from(99)), ..Default::default() };
@@ -521,16 +521,16 @@ mod tests {
     }
 
     #[test]
-    fn merge_block_overrides_uses_flashblock_env_when_user_absent() {
+    fn merge_block_overrides_uses_milliblock_env_when_user_absent() {
         // This is the fix's core case: pending call with no user block overrides gets the
-        // flashblock's block-N environment (number/time/basefee/coinbase).
-        let flashblock = BlockOverrides {
+        // milliblock's block-N environment (number/time/basefee/coinbase).
+        let milliblock = BlockOverrides {
             number: Some(U256::from(100)),
             time: Some(1234),
             base_fee: Some(U256::from(7)),
             ..Default::default()
         };
-        let merged = merge_block_overrides(Some(flashblock), None).unwrap();
+        let merged = merge_block_overrides(Some(milliblock), None).unwrap();
         assert_eq!(merged.number, Some(U256::from(100)));
         assert_eq!(merged.time, Some(1234));
         assert_eq!(merged.base_fee, Some(U256::from(7)));
@@ -538,21 +538,21 @@ mod tests {
 
     #[test]
     fn merge_block_overrides_user_fields_win_per_field() {
-        // User-supplied fields win; unset user fields fall back to the flashblock env.
-        let flashblock = BlockOverrides {
+        // User-supplied fields win; unset user fields fall back to the milliblock env.
+        let milliblock = BlockOverrides {
             number: Some(U256::from(100)),
             time: Some(1234),
             base_fee: Some(U256::from(7)),
             ..Default::default()
         };
         let user = BlockOverrides { number: Some(U256::from(200)), ..Default::default() };
-        let merged = merge_block_overrides(Some(flashblock), Some(user)).unwrap();
+        let merged = merge_block_overrides(Some(milliblock), Some(user)).unwrap();
         assert_eq!(merged.number, Some(U256::from(200)), "user number wins");
-        assert_eq!(merged.time, Some(1234), "unset user field falls back to flashblock");
+        assert_eq!(merged.time, Some(1234), "unset user field falls back to milliblock");
         assert_eq!(
             merged.base_fee,
             Some(U256::from(7)),
-            "unset user field falls back to flashblock"
+            "unset user field falls back to milliblock"
         );
     }
 }

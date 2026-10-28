@@ -1,4 +1,4 @@
-//! Node launcher: wires the proof-history ExEx/RPC overrides and the flashblocks
+//! Node launcher: wires the proof-history ExEx/RPC overrides and the milliblocks
 //! pending-state RPC overrides onto the Conduit OP-Reth node.
 
 // Keep this close to `reth_optimism_node::proof_history` from the pinned upstream op-reth tag.
@@ -7,8 +7,8 @@
 
 use crate::{
     chainspec::ConduitOpChainSpec,
-    flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     hardforks::{ConduitOpHardfork, ConduitOpHardforks},
+    milliblocks_state::{MilliblocksCallApiServer, MilliblocksCallExt, PendingMilliblockState},
     node::ConduitOpNode,
     slipstream::SlipstreamProxy,
 };
@@ -65,7 +65,7 @@ pub async fn launch_node(
     }
 
     if !args.proofs_history {
-        let flashblocks_enabled = args.flashblocks_url.is_some();
+        let milliblocks_enabled = args.flashblocks_url.is_some();
         let mut node = ConduitOpNode::new(args);
         node.historical_rpc_block = historical_rpc_block;
         node.enforce_tracked_nonce = enforce_tracked_nonce;
@@ -73,7 +73,7 @@ pub async fn launch_node(
             .node(node)
             .extend_rpc_modules(move |mut ctx| {
                 let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
-                install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+                install_milliblocks_call_overrides(&mut ctx, milliblocks_enabled)?;
                 install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)
             })
             .launch_with_debug_capabilities()
@@ -126,7 +126,7 @@ where
     let RollupArgs { proofs_history_window, proofs_history_verification_interval, .. } =
         args.clone();
     let proofs_history_window = proofs_history_window.window;
-    let flashblocks_enabled = args.flashblocks_url.is_some();
+    let milliblocks_enabled = args.flashblocks_url.is_some();
     let mut node = ConduitOpNode::new(args);
     node.historical_rpc_block = historical_rpc_block;
     node.enforce_tracked_nonce = enforce_tracked_nonce;
@@ -151,7 +151,7 @@ where
         })
         .extend_rpc_modules(move |mut ctx| {
             let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
-            install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
+            install_milliblocks_call_overrides(&mut ctx, milliblocks_enabled)?;
             install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
 
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
@@ -188,26 +188,26 @@ fn validate_slipstream_config(args: &RollupArgs, slipstream_enabled: bool) -> ey
     Ok(())
 }
 
-/// Installs the flashblocks pending-state RPC overrides (`eth_call`, `eth_estimateGas`,
-/// `eth_simulateV1`) when flashblocks are enabled.
-fn install_flashblocks_call_overrides<N, EthApi>(
+/// Installs the milliblocks pending-state RPC overrides (`eth_call`, `eth_estimateGas`,
+/// `eth_simulateV1`) when milliblocks are enabled.
+fn install_milliblocks_call_overrides<N, EthApi>(
     ctx: &mut RpcContext<'_, N, EthApi>,
-    flashblocks_enabled: bool,
+    milliblocks_enabled: bool,
 ) -> eyre::Result<()>
 where
     N: FullNodeComponents,
-    EthApi: FullEthApi + PendingFlashblockState + Clone + Send + Sync + 'static,
+    EthApi: FullEthApi + PendingMilliblockState + Clone + Send + Sync + 'static,
     ErrorObject<'static>: From<<EthApi as EthApiTypes>::Error>,
 {
-    if !flashblocks_enabled {
+    if !milliblocks_enabled {
         return Ok(());
     }
 
-    info!(target: "reth::cli", "Installing flashblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
-    let ext = FlashblocksCallExt::new(ctx.registry.eth_api().clone());
+    info!(target: "reth::cli", "Installing milliblocks pending-state RPC overrides (eth_call, eth_estimateGas, eth_simulateV1)");
+    let ext = MilliblocksCallExt::new(ctx.registry.eth_api().clone());
     // Only replace the methods on transports that serve the `eth` namespace.
     ctx.modules.add_or_replace_if_module_configured(RethRpcModule::Eth, ext.into_rpc())?;
-    info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+    info!(target: "reth::cli", "Milliblocks pending-state RPC overrides installed");
     Ok(())
 }
 
