@@ -49,19 +49,19 @@ struct ConduitRollupArgs {
 type ConduitCli =
     Cli<ConduitOpChainSpecParser, ConduitRollupArgs, DefaultRpcModuleValidator, ConduitSubCommand>;
 
-/// Present Conduit's terminology while retaining upstream argument IDs for decoding.
+/// Expose only Milliblocks flags. IDs identify fields for upstream decoding, not CLI aliases.
 fn cli_command() -> clap::Command {
     ConduitCli::command().mut_subcommand("node", |node| {
         node.mut_arg("flashblocks_url", |arg| {
             arg.long("milliblocks-url")
-                .alias("flashblocks-url")
+                .alias(None)
                 .value_name("URL")
                 .help("WebSocket URL providing milliblocks for pending state")
                 .long_help("WebSocket URL providing milliblocks. Requests using the pending block tag observe the streamed preconfirmed state.")
         })
         .mut_arg("flashblock_consensus", |arg| {
             arg.long("milliblock-consensus")
-                .alias("flashblock-consensus")
+                .alias(None)
                 .help("Advance the chain using the milliblock consensus client")
                 .long_help("Process milliblock sequences through the Engine API to advance the chain. Requires --milliblocks-url.")
         })
@@ -120,22 +120,14 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn milliblock_options_preserve_upstream_wiring_and_legacy_aliases() {
-        for (url_flag, consensus_flag) in [
-            ("--milliblocks-url", "--milliblock-consensus"),
-            ("--flashblocks-url", "--flashblock-consensus"),
-            ("--subblocks-url", "--subblocks-consensus"),
-            ("--websocket-url", "--milliblock-consensus"),
-        ] {
-            let matches = cli_command()
-                .try_get_matches_from([
-                    "conduit-op-reth",
-                    "node",
-                    url_flag,
-                    "ws://127.0.0.1:1234",
-                    consensus_flag,
-                ])
-                .unwrap();
+    fn milliblock_options_preserve_upstream_wiring_without_legacy_aliases() {
+        for consensus in [false, true] {
+            let mut args =
+                vec!["conduit-op-reth", "node", "--milliblocks-url", "ws://127.0.0.1:1234"];
+            if consensus {
+                args.push("--milliblock-consensus");
+            }
+            let matches = cli_command().try_get_matches_from(args).unwrap();
             let reth_ethereum_cli::Commands::Node(command) =
                 ConduitCli::from_arg_matches(&matches).unwrap().command
             else {
@@ -145,7 +137,25 @@ mod tests {
                 command.ext.rollup.flashblocks_url.unwrap().as_str(),
                 "ws://127.0.0.1:1234/"
             );
-            assert!(command.ext.rollup.flashblock_consensus);
+            assert_eq!(command.ext.rollup.flashblock_consensus, consensus);
+        }
+        for legacy_flag in [
+            "--flashblocks-url",
+            "--flashblock-consensus",
+            "--subblocks-url",
+            "--subblocks-consensus",
+            "--websocket-url",
+        ] {
+            let error = cli_command()
+                .try_get_matches_from([
+                    "conduit-op-reth",
+                    "node",
+                    "--milliblocks-url",
+                    "ws://127.0.0.1:1234",
+                    legacy_flag,
+                ])
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
         let error = cli_command()
             .try_get_matches_from(["conduit-op-reth", "node", "--milliblock-consensus"])

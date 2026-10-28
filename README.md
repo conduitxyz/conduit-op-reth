@@ -41,8 +41,9 @@ Use `--milliblocks-url <URL>` to receive streamed preconfirmations for pending-s
 RPC requests. Add `--milliblock-consensus` when the stream should also advance the
 chain through the Engine API. Both options configure the existing upstream client.
 
-Legacy CLI spellings remain hidden aliases, so existing node configurations still
-start. Slipstream response keys remain unchanged for existing builders and clients.
+Only these Milliblocks CLI spellings are accepted. Update existing node launch
+arguments before upgrading; legacy spellings are rejected.
+Slipstream response keys remain unchanged for existing builders and clients.
 Conduit-owned code and log messages use milliblocks; upstream dependency symbols,
 metrics, and log messages retain their upstream names.
 
