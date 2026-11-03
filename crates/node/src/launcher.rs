@@ -20,16 +20,13 @@ use reth_db::DatabaseEnv;
 use reth_db_api::database_metrics::DatabaseMetrics;
 use reth_node_builder::{FullNodeComponents, NodeBuilder, WithLaunchContext, rpc::RpcContext};
 use reth_optimism_exex::OpProofsExEx;
-use reth_optimism_node::args::{ProofsStorageVersion, RollupArgs};
+use reth_optimism_node::args::RollupArgs;
 use reth_optimism_rpc::{
     SequencerClient,
     debug::{DebugApiExt, DebugApiOverrideServer},
     eth::proofs::{EthApiExt, EthApiOverrideServer},
 };
-use reth_optimism_trie::{
-    OpProofsStorage, OpProofsStore,
-    db::{MdbxProofsStorage, MdbxProofsStorageV2},
-};
+use reth_optimism_trie::{OpProofsStorage, OpProofsStore, db::MdbxProofsStorage};
 use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
 use reth_rpc_server_types::RethRpcModule;
 use reth_tasks::TaskExecutor;
@@ -44,9 +41,14 @@ pub async fn launch_node(
     args: RollupArgs,
     slipstream_enabled: bool,
     historical_rpc_block: Option<u64>,
+    enforce_tracked_nonce: bool,
 ) -> eyre::Result<(), ErrReport> {
     validate_slipstream_config(&args, slipstream_enabled)?;
     let config = builder.config();
+    eyre::ensure!(
+        config.engine.num_state_masking_blocks() == 0,
+        "--engine.num-state-masking-blocks must be 0 on op-reth: state masking is not supported"
+    );
     if let Some(max_initcode_size) =
         config.chain.evm_limits_fork0.and_then(|limits| limits.max_initcode_size) &&
         max_initcode_size >= config.txpool.max_tx_input_bytes
@@ -66,6 +68,7 @@ pub async fn launch_node(
         let flashblocks_enabled = args.flashblocks_url.is_some();
         let mut node = ConduitOpNode::new(args);
         node.historical_rpc_block = historical_rpc_block;
+        node.enforce_tracked_nonce = enforce_tracked_nonce;
         let handle = builder
             .node(node)
             .extend_rpc_modules(move |mut ctx| {
@@ -81,26 +84,28 @@ pub async fn launch_node(
     // Defaults to `<reth-data-dir>/historical-proofs` when not supplied.
     let path = args.history.resolve_storage_path(builder.config().datadir().as_ref());
 
-    match args.history.storage_version {
-        ProofsStorageVersion::V1 => {
-            info!(target: "reth::cli", "Using on-disk storage for proofs history (v1)");
-            let mdbx = Arc::new(
-                MdbxProofsStorage::new(&path)
-                    .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorage: {e}"))?,
-            );
-            launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc_block)
-                .await
-        }
-        ProofsStorageVersion::V2 => {
-            info!(target: "reth::cli", "Using on-disk storage for proofs history (v2)");
-            let mdbx = Arc::new(
-                MdbxProofsStorageV2::new(&path)
-                    .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorageV2: {e}"))?,
-            );
-            launch_with_proof_history(builder, args, mdbx, slipstream_enabled, historical_rpc_block)
-                .await
-        }
+    info!(target: "reth::cli", "Using on-disk storage for proofs history (v2)");
+    let mdbx = Arc::new(
+        MdbxProofsStorage::new(&path)
+            .map_err(|e| eyre::eyre!("Failed to create MdbxProofsStorage: {e}"))?,
+    );
+    if mdbx.holds_only_legacy_v1_data()? {
+        eyre::bail!(
+            "Proofs storage at {} only holds legacy v1 data. Use a fresh \
+             --proofs-history.storage-path, then run 'conduit-op-reth proofs init \
+             --proofs-history.storage-path <PATH>'.",
+            path.display()
+        );
     }
+    launch_with_proof_history(
+        builder,
+        args,
+        mdbx,
+        slipstream_enabled,
+        historical_rpc_block,
+        enforce_tracked_nonce,
+    )
+    .await
 }
 
 /// Installs the ExEx, RPC overrides, and metrics hook for proof history, then launches the node.
@@ -110,6 +115,7 @@ async fn launch_with_proof_history<S>(
     mdbx: Arc<S>,
     slipstream_enabled: bool,
     historical_rpc_block: Option<u64>,
+    enforce_tracked_nonce: bool,
 ) -> eyre::Result<(), ErrReport>
 where
     S: OpProofsStore + DatabaseMetrics + Send + Sync + 'static,
@@ -123,6 +129,7 @@ where
     let flashblocks_enabled = args.flashblocks_url.is_some();
     let mut node = ConduitOpNode::new(args);
     node.historical_rpc_block = historical_rpc_block;
+    node.enforce_tracked_nonce = enforce_tracked_nonce;
 
     let handle = builder
         .node(node)
