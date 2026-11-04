@@ -6,6 +6,7 @@ pub mod launcher;
 pub mod node;
 pub mod policy_evm;
 pub mod pool;
+pub mod pool_allowlist;
 pub mod slipstream;
 pub mod state_override;
 pub mod tx_allowlist;

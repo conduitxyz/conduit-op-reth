@@ -29,6 +29,7 @@ use reth_e2e_test_utils::transaction::TransactionTestContext;
 use reth_provider::StateProviderFactory;
 use reth_rpc_eth_api::helpers::EthTransactions;
 use reth_storage_api::{AccountReader, StateProvider};
+use reth_transaction_pool::TransactionPool;
 
 const FACTORY: Address = address!("00000000000000000000000000000000000fac70");
 /// L1 address of the chain's `L1CrossDomainMessenger`.
@@ -125,6 +126,18 @@ fn request(chain_id: u64, nonce: u64, to: TxKind, input: Bytes) -> TransactionRe
     }
 }
 
+/// Waits for the pool's allowlist maintenance, which follows canonical blocks asynchronously, to
+/// evict `hash`.
+async fn wait_evicted(pool: &impl TransactionPool, hash: B256) {
+    for _ in 0..100 {
+        if !pool.contains(&hash) {
+            return
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("{hash} was not evicted");
+}
+
 #[tokio::test]
 async fn test_deployer_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -140,11 +153,16 @@ async fn test_deployer_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
         attributes_with_deposit(timestamp, TxKind::Create, DEPLOYABLE_INITCODE)
     });
 
-    macro_rules! send {
+    macro_rules! try_send {
         ($signer:expr, $request:expr) => {{
             let signed = TransactionTestContext::sign_tx($signer.clone(), $request).await;
-            ctx.rpc.inject_tx(Bytes::from(signed.encoded_2718())).await?
+            ctx.rpc.inject_tx(Bytes::from(signed.encoded_2718())).await
         }};
+    }
+    macro_rules! send {
+        ($signer:expr, $request:expr) => {
+            try_send!($signer, $request)?
+        };
     }
     macro_rules! succeeded {
         ($hash:expr) => {
@@ -179,13 +197,16 @@ async fn test_deployer_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
         Some(U256::from(Role::Admin as u8))
     );
 
-    // Block 3: the unlisted user deploys through the factory and directly, and the deposit tries
-    // a top-level create. All three are included; none deploys anything.
+    // The pool turns away the unlisted user's top-level create.
+    let error = try_send!(user, request(chain_id, 0, TxKind::Create, DEPLOYABLE_INITCODE))
+        .expect_err("the pool rejects a denied deployer's create");
+    assert!(error.to_string().contains("contract deployer is not allowlisted"), "{error}");
+
+    // Block 3: the unlisted user deploys through the factory, which the pool cannot detect, and
+    // the deposit tries a top-level create. Both are included; neither deploys anything.
     let via_factory = send!(user, request(chain_id, 0, TxKind::Call(FACTORY), Bytes::new()));
-    let direct = send!(user, request(chain_id, 1, TxKind::Create, DEPLOYABLE_INITCODE));
     let denied = advance!(ctx);
     assert!(succeeded!(via_factory), "the factory call itself succeeds");
-    assert!(!succeeded!(direct), "the direct create reverts");
 
     assert!(
         !succeeded!(find_deposit(&denied.block().body().transactions)),
@@ -199,7 +220,7 @@ async fn test_deployer_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
         U256::ZERO,
         "factory saw address zero"
     );
-    for created in [FACTORY.create(1), user.address().create(1), DEPOSITOR.create(0)] {
+    for created in [FACTORY.create(1), user.address().create(0), DEPOSITOR.create(0)] {
         assert!(state.account_code(&created)?.is_none(), "{created} must not be deployed");
     }
     assert_eq!(
@@ -215,9 +236,11 @@ async fn test_deployer_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
     advance!(ctx);
     assert!(succeeded!(grant_hash));
 
-    // Block 5: the same factory call now deploys.
-    send!(user, request(chain_id, 2, TxKind::Call(FACTORY), Bytes::new()));
+    // Block 5: the same factory call now deploys, and so does a direct create.
+    send!(user, request(chain_id, 1, TxKind::Call(FACTORY), Bytes::new()));
+    let direct = send!(user, request(chain_id, 2, TxKind::Create, DEPLOYABLE_INITCODE));
     advance!(ctx);
+    assert!(succeeded!(direct));
     let state = ctx.inner.provider.latest()?;
     let created = FACTORY.create(2);
     assert_eq!(
@@ -225,6 +248,15 @@ async fn test_deployer_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
         Some(U256::from_be_bytes(created.into_word().0))
     );
     assert!(state.account_code(&created)?.is_some(), "the enabled user's contract is deployed");
+    assert!(state.account_code(&user.address().create(2))?.is_some());
+
+    // A create the user queues behind a nonce gap is evicted once the admin revokes the user.
+    let queued = send!(user, request(chain_id, 9, TxKind::Create, DEPLOYABLE_INITCODE));
+    let revoke = IConduitAllowList::setNoneCall { addr: user.address() }.abi_encode();
+    send!(admin, request(chain_id, 1, TxKind::Call(DEPLOYER_ALLOWLIST.address), revoke.into()));
+    assert!(ctx.inner.pool.contains(&queued));
+    advance!(ctx);
+    wait_evicted(&ctx.inner.pool, queued).await;
 
     Ok(())
 }
@@ -264,11 +296,16 @@ async fn test_tx_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
         }};
     }
 
-    macro_rules! send {
+    macro_rules! try_send {
         ($signer:expr, $request:expr) => {{
             let signed = TransactionTestContext::sign_tx($signer.clone(), $request).await;
-            ctx.rpc.inject_tx(Bytes::from(signed.encoded_2718())).await?
+            ctx.rpc.inject_tx(Bytes::from(signed.encoded_2718())).await
         }};
+    }
+    macro_rules! send {
+        ($signer:expr, $request:expr) => {
+            try_send!($signer, $request)?
+        };
     }
     macro_rules! receipt {
         ($hash:expr) => {
@@ -302,16 +339,13 @@ async fn test_tx_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
     };
     client.request::<Bytes, _>("eth_call", rpc_params![call]).await?;
 
-    // Block 3: the unlisted user's transaction is left out; the unlisted deposit is included but
-    // only bumps its nonce and keeps its mint.
-    let pending = send!(user, request(chain_id, 0, TxKind::Call(FACTORY), Bytes::new()));
-    let denied = advance!(ctx);
-    assert!(
-        !denied.block().body().transactions.iter().any(|tx| tx.tx_hash() == pending),
-        "the unlisted user's transaction is not included"
-    );
-    assert!(receipt!(pending).is_none());
+    // The pool turns away the unlisted user's transaction.
+    let error = try_send!(user, request(chain_id, 0, TxKind::Call(FACTORY), Bytes::new()))
+        .expect_err("the pool rejects a denied sender");
+    assert!(error.to_string().contains(TX_SENDER_NOT_ALLOWLISTED), "{error}");
 
+    // Block 3: the unlisted deposit is included but only bumps its nonce and keeps its mint.
+    let denied = advance!(ctx);
     let deposit = receipt!(find_deposit(&denied.block().body().transactions)).expect("included");
     assert!(!deposit.inner.inner.status(), "the denied deposit reverts");
     let state = ctx.inner.provider.latest()?;
@@ -320,16 +354,25 @@ async fn test_tx_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
     assert_eq!(depositor.nonce, 1, "the deposit's nonce is bumped");
     assert_eq!(state.basic_account(&FACTORY)?.unwrap().nonce, 1, "the deposit's call never ran");
 
-    // Block 4: the admin enables the user. Block 5: the still-pending transaction goes through.
+    // Block 4: the admin enables the user. Block 5: the user's transaction goes through.
     let grant = IConduitAllowList::setEnabledCall { addr: user.address() }.abi_encode();
     let grant_hash =
         send!(admin, request(chain_id, 0, TxKind::Call(TX_ALLOWLIST.address), grant.into()));
     advance!(ctx);
     assert!(receipt!(grant_hash).expect("included").inner.inner.status());
     estimate!(user.address())?;
+    let allowed = send!(user, request(chain_id, 0, TxKind::Call(FACTORY), Bytes::new()));
     advance!(ctx);
-    let included = receipt!(pending).expect("the user's transaction is included once enabled");
-    assert!(included.inner.inner.status());
+    assert!(receipt!(allowed).expect("included").inner.inner.status());
+
+    // A transaction the user queues behind a nonce gap is evicted once the admin revokes the
+    // user.
+    let queued = send!(user, request(chain_id, 9, TxKind::Call(FACTORY), Bytes::new()));
+    let revoke = IConduitAllowList::setNoneCall { addr: user.address() }.abi_encode();
+    send!(admin, request(chain_id, 1, TxKind::Call(TX_ALLOWLIST.address), revoke.into()));
+    assert!(ctx.inner.pool.contains(&queued));
+    advance!(ctx);
+    wait_evicted(&ctx.inner.pool, queued).await;
 
     Ok(())
 }

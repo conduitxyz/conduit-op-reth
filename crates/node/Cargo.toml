@@ -20,6 +20,7 @@ reth-chainspec.workspace = true
 reth-cli.workspace = true
 reth-evm.workspace = true
 reth-node-builder.workspace = true
+reth-storage-api.workspace = true
 reth-primitives-traits.workspace = true
 reth-engine-local.workspace = true
 reth-node-api.workspace = true

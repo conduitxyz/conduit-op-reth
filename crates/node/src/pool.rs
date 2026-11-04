@@ -1,5 +1,11 @@
 //! Opt-in pool configuration not exposed by upstream's OP pool builder.
 
+use crate::{
+    chainspec::ConduitOpChainSpec,
+    pool_allowlist::{
+        PolicyValidator, PolicyValidatorWrapper, PoolPolicies, maintain_pool_policies,
+    },
+};
 use reth_chainspec::{EthChainSpec, ForkCondition};
 use reth_evm::ConfigureEvm;
 use reth_node_builder::{BuilderContext, NodeTypes, components::PoolBuilder, node::FullNodeTypes};
@@ -7,15 +13,19 @@ use reth_optimism_forks::{OpHardfork, OpHardforks};
 use reth_optimism_node::node::{OpPoolBuilder, OpValidatorWrapper};
 use reth_optimism_primitives::OpPrimitives;
 use reth_optimism_txpool::{
-    OpPool, OpTransactionPool, OpTransactionValidator, interop_filter::InteropFilterClient,
+    OpCustomTransactionPool, OpPool, OpPooledTransaction, OpTransactionValidator,
+    interop_filter::InteropFilterClient,
 };
 use reth_provider::CanonStateSubscriptions;
 use reth_transaction_pool::{
-    Pool, TransactionValidationTaskExecutor, blobstore::DiskFileBlobStore,
+    CoinbaseTipOrdering, Pool, TransactionValidationTaskExecutor, blobstore::DiskFileBlobStore,
 };
 use tracing::{info, warn};
 
 /// Keeps the stock pool path by default, with an explicit tracked-nonce opt-in.
+///
+/// Both paths admit transactions through a [`PolicyValidator`] and, on chains that configure an
+/// allowlist fork, run [`maintain_pool_policies`]; see [`crate::pool_allowlist`].
 ///
 /// Upstream's `OpPoolBuilder` does not expose this `PoolConfig` field. Keep the opt-in
 /// construction below aligned with its `build_pool`, including OP maintenance tasks.
@@ -27,23 +37,64 @@ pub struct ConduitOpPoolBuilder {
     pub enforce_tracked_nonce: bool,
 }
 
+/// The pool [`ConduitOpPoolBuilder`] builds: op-reth's pool, admitting transactions through a
+/// [`PolicyValidator`].
+pub type ConduitOpTransactionPool<Client, Evm> = OpCustomTransactionPool<
+    DiskFileBlobStore,
+    PolicyValidator<OpTransactionValidator<Client, OpPooledTransaction, Evm>, Client>,
+    CoinbaseTipOrdering<OpPooledTransaction>,
+>;
+
 impl<Node, Evm> PoolBuilder<Node, Evm> for ConduitOpPoolBuilder
 where
-    Node: FullNodeTypes<Types: NodeTypes<ChainSpec: OpHardforks, Primitives = OpPrimitives>>,
+    Node:
+        FullNodeTypes<Types: NodeTypes<ChainSpec = ConduitOpChainSpec, Primitives = OpPrimitives>>,
     Evm: ConfigureEvm<Primitives = OpPrimitives> + Clone + 'static,
 {
-    type Pool = OpTransactionPool<Node::Provider, DiskFileBlobStore, Evm>;
+    type Pool = ConduitOpTransactionPool<Node::Provider, Evm>;
 
     async fn build_pool(
         self,
         ctx: &BuilderContext<Node>,
         evm_config: Evm,
     ) -> eyre::Result<Self::Pool> {
+        let pool = self.build_inner(ctx, evm_config).await?;
+
+        // Evict what the allowlists deny when they change; admission is the `PolicyValidator`.
+        let policies = PoolPolicies::new(ctx.chain_spec().as_ref());
+        if policies.any() {
+            ctx.task_executor().spawn_critical_task(
+                "conduit allowlist txpool maintenance",
+                maintain_pool_policies(
+                    pool.clone(),
+                    ctx.provider().clone(),
+                    policies,
+                    ctx.provider().canonical_state_stream(),
+                ),
+            );
+            info!(target: "reth::cli", ?policies, "Transaction pool enforces the allowlists");
+        }
+        Ok(pool)
+    }
+}
+
+impl ConduitOpPoolBuilder {
+    async fn build_inner<Node, Evm>(
+        self,
+        ctx: &BuilderContext<Node>,
+        evm_config: Evm,
+    ) -> eyre::Result<ConduitOpTransactionPool<Node::Provider, Evm>>
+    where
+        Node: FullNodeTypes<
+            Types: NodeTypes<ChainSpec = ConduitOpChainSpec, Primitives = OpPrimitives>,
+        >,
+        Evm: ConfigureEvm<Primitives = OpPrimitives> + Clone + 'static,
+    {
+        let builder = self.inner.with_validator_wrapper(PolicyValidatorWrapper);
         if !self.enforce_tracked_nonce {
-            return self.inner.build_pool(ctx, evm_config).await;
+            return builder.build_pool(ctx, evm_config).await;
         }
 
-        let builder = self.inner;
         let interop_client = if builder.interop_endpoints.is_empty() {
             None
         } else {
