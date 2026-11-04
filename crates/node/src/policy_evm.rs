@@ -13,7 +13,7 @@ use crate::{
     chainspec::ConduitOpChainSpec,
     deployer_allowlist::{DEPLOYER_ALLOWLIST, deny_top_level_create, install_create_guards},
     hardforks::{ConduitOpHardfork, ConduitOpHardforks},
-    tx_allowlist::{TX_ALLOWLIST, TxSenderCheck, allow_tx_sender},
+    tx_allowlist::{TX_ALLOWLIST, TX_SENDER_NOT_ALLOWLISTED, TxSenderCheck, allow_tx_sender},
 };
 use alloy_evm::{Database, Evm, EvmEnv, EvmFactory, precompiles::PrecompilesMap};
 use alloy_op_evm::{
@@ -109,9 +109,15 @@ where
         mut tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         // RPC simulations (`eth_call`, `eth_estimateGas`, `eth_simulateV1`) are the only callers
-        // that disable EIP-3607, which consensus execution never does. They skip the sender
-        // check so read-only calls from unlisted or omitted senders keep working.
+        // that disable EIP-3607, which consensus execution never does. Policy rejections in them
+        // are not logged.
         let simulation = self.inner.cfg_env().disable_eip3607;
+        // Of those, only reth's `prepare_call_env` (`eth_call`, `eth_createAccessList` and the
+        // `debug_`/`trace_` call methods) also lifts the block gas limit. These read-only calls
+        // skip the sender check so that unlisted or omitted senders can still query state, while
+        // `eth_estimateGas` and `eth_simulateV1` keep it, so they never succeed for a
+        // transaction the sequencer will drop.
+        let read_only_call = simulation && self.inner.cfg_env().disable_block_gas_limit;
         let block_number = self.inner.block.number.saturating_to();
         // Between transactions the journal is empty, so the database holds each policy as
         // committed by every earlier transaction in the block.
@@ -119,16 +125,18 @@ where
 
         // The transaction allowlist is checked first. A deposit it denies has already been
         // rewritten into a reverted no-op, so the deployer allowlist has nothing left to check.
-        let check = if self.tx_allowlist_active && !simulation {
-            allow_tx_sender(&mut tx, block_number, |key| db.storage(TX_ALLOWLIST.address, key))
-                .map_err(EVMError::Database)?
+        let check = if self.tx_allowlist_active && !read_only_call {
+            allow_tx_sender(&mut tx, block_number, !simulation, |key| {
+                db.storage(TX_ALLOWLIST.address, key)
+            })
+            .map_err(EVMError::Database)?
         } else {
             TxSenderCheck::Allowed
         };
         match check {
             TxSenderCheck::Rejected => {
                 return Err(EVMError::Transaction(OpTxError(OpTransactionError::Base(
-                    InvalidTransaction::Str("transaction sender is not allowlisted".into()),
+                    InvalidTransaction::Str(TX_SENDER_NOT_ALLOWLISTED.into()),
                 ))));
             }
             TxSenderCheck::Allowed if self.deployer_allowlist_active => {
@@ -432,6 +440,17 @@ mod tests {
         dir
     }
 
+    /// The caller a test transaction runs under.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Run {
+        /// Block building and validation.
+        Block,
+        /// A read-only RPC call, such as `eth_call`.
+        Call,
+        /// `eth_estimateGas` or `eth_simulateV1`.
+        Estimate,
+    }
+
     /// A database with the factories, proxies and a funded admin, seeded as the activation block
     /// would seed it.
     struct Chain {
@@ -484,20 +503,22 @@ mod tests {
         }
 
         fn run_at(&mut self, timestamp: u64, tx: OpTx) -> ExecutionResult<OpHaltReason> {
-            self.try_run_at(timestamp, tx, false).expect("transaction executes")
+            self.try_run_at(timestamp, tx, Run::Block).expect("transaction executes")
         }
 
-        /// Runs `tx`, as an RPC simulation if `simulation` is set.
+        /// Runs `tx` in the environment `run` sets up.
         fn try_run_at(
             &mut self,
             timestamp: u64,
             tx: OpTx,
-            simulation: bool,
+            run: Run,
         ) -> Result<ExecutionResult<OpHaltReason>, EVMError<core::convert::Infallible, OpTxError>>
         {
             let mut cfg_env = CfgEnv::new_with_spec(OpSpecId::ISTHMUS);
             cfg_env.chain_id = 901;
-            cfg_env.disable_eip3607 = simulation;
+            // Mirrors the settings reth's RPC applies, see `ConduitOpEvm::transact_raw`.
+            cfg_env.disable_eip3607 = run != Run::Block;
+            cfg_env.disable_block_gas_limit = run == Run::Call;
             let block_env = BlockEnv {
                 number: U256::from(10),
                 timestamp: U256::from(timestamp),
@@ -901,7 +922,7 @@ mod tests {
     fn tx_allowlist_rejects_unlisted_l2_senders() {
         let mut chain = Chain::tx("allowlist");
         let tx = chain.l2(OTHER, TxKind::Call(FACTORY), Bytes::new(), 0);
-        let reason = invalid_tx_reason(chain.try_run_at(ACTIVATION, tx, false));
+        let reason = invalid_tx_reason(chain.try_run_at(ACTIVATION, tx, Run::Block));
         assert!(reason.contains("not allowlisted"), "{reason}");
         assert_eq!(chain.nonce(OTHER), 0, "a rejected transaction keeps its nonce");
         assert_eq!(chain.nonce(FACTORY), 1, "and has no effect");
@@ -940,7 +961,7 @@ mod tests {
 
         // OTHER is blocked at genesis; unlisted accounts may transact.
         let tx = chain.l2(OTHER, TxKind::Call(FACTORY), Bytes::new(), 0);
-        invalid_tx_reason(chain.try_run_at(ACTIVATION, tx, false));
+        invalid_tx_reason(chain.try_run_at(ACTIVATION, tx, Run::Block));
         let unlisted = address!("0000000000000000000000000000000000000c0c");
         let tx = chain.l2(unlisted, TxKind::Call(FACTORY), Bytes::new(), 0);
         assert!(chain.run(tx).is_success());
@@ -963,11 +984,19 @@ mod tests {
     }
 
     #[test]
-    fn tx_allowlist_is_skipped_by_rpc_simulations() {
+    fn tx_allowlist_is_skipped_by_read_only_calls() {
         let mut chain = Chain::tx("allowlist");
         let tx = chain.l2(OTHER, TxKind::Call(FACTORY), Bytes::new(), 0);
-        let result = chain.try_run_at(ACTIVATION, tx, true).expect("simulations run");
+        let result = chain.try_run_at(ACTIVATION, tx, Run::Call).expect("calls run");
         assert!(result.is_success());
+    }
+
+    #[test]
+    fn tx_allowlist_is_enforced_by_gas_estimation() {
+        let mut chain = Chain::tx("allowlist");
+        let tx = chain.l2(OTHER, TxKind::Call(FACTORY), Bytes::new(), 0);
+        let reason = invalid_tx_reason(chain.try_run_at(ACTIVATION, tx, Run::Estimate));
+        assert_eq!(reason, TX_SENDER_NOT_ALLOWLISTED);
     }
 
     #[test]
@@ -1124,7 +1153,7 @@ mod tests {
     fn rpc_simulations_still_enforce_the_deployer_allowlist() {
         let mut chain = Chain::new("allowlist");
         let tx = chain.l2(OTHER, TxKind::Call(FACTORY), Bytes::new(), 0);
-        let result = chain.try_run_at(ACTIVATION, tx, true).expect("simulations run");
+        let result = chain.try_run_at(ACTIVATION, tx, Run::Call).expect("calls run");
         assert!(result.is_success());
         assert_create_denied(&chain, FACTORY);
     }

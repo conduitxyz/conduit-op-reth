@@ -35,6 +35,9 @@ pub const TX_ALLOWLIST: AllowList = AllowList {
     privileged_always_allowed: true,
 };
 
+/// Why an L2 transaction from a sender the transaction allowlist denies is invalid.
+pub const TX_SENDER_NOT_ALLOWLISTED: &str = "transaction sender is not allowlisted";
+
 /// Outcome of applying the transaction allowlist to a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxSenderCheck {
@@ -48,10 +51,12 @@ pub enum TxSenderCheck {
 
 /// Applies the transaction allowlist to `tx` before execution.
 ///
-/// `read` reads precompile storage as committed before the transaction.
+/// `read` reads precompile storage as committed before the transaction. A denial is logged if
+/// `log` is set.
 pub fn allow_tx_sender<E>(
     tx: &mut OpTx,
     block_number: u64,
+    log: bool,
     read: impl FnMut(U256) -> Result<U256, E>,
 ) -> Result<TxSenderCheck, E> {
     if TX_ALLOWLIST.is_allowed(tx.caller(), read)? {
@@ -59,15 +64,17 @@ pub fn allow_tx_sender<E>(
     }
 
     let deposit = is_deposit(tx);
-    tracing::info!(
-        target: POLICY_REJECTION_TARGET,
-        rule = TX_ALLOWLIST.name,
-        deposit,
-        tx_hash = ?tx.enveloped_tx().map(keccak256),
-        origin = %tx.caller(),
-        block_number,
-        "denied transaction sender"
-    );
+    if log {
+        tracing::info!(
+            target: POLICY_REJECTION_TARGET,
+            rule = TX_ALLOWLIST.name,
+            deposit,
+            tx_hash = ?tx.enveloped_tx().map(keccak256),
+            origin = %tx.caller(),
+            block_number,
+            "denied transaction sender"
+        );
+    }
     if !deposit {
         return Ok(TxSenderCheck::Rejected);
     }

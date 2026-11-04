@@ -20,8 +20,9 @@ use conduit_op_reth_node::{
     chainspec::l1_to_l2_alias,
     deployer_allowlist::DEPLOYER_ALLOWLIST,
     hardforks::ConduitOpHardforks,
-    tx_allowlist::TX_ALLOWLIST,
+    tx_allowlist::{TX_ALLOWLIST, TX_SENDER_NOT_ALLOWLISTED},
 };
+use jsonrpsee::{core::client::ClientT, rpc_params};
 use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
 use reth_chainspec::EthChainSpec;
 use reth_e2e_test_utils::transaction::TransactionTestContext;
@@ -242,6 +243,26 @@ async fn test_tx_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
     let (_tasks, mut ctx) = launch_test_node!(chain_spec.clone(), |timestamp| {
         attributes_with_deposit(timestamp, TxKind::Call(FACTORY), Bytes::new())
     });
+    let client = ctx.inner.rpc_server_handle().http_client().expect("http rpc");
+    macro_rules! estimate {
+        ($from:expr) => {{
+            let call = TransactionRequest {
+                from: Some($from),
+                to: Some(TxKind::Call(FACTORY)),
+                ..Default::default()
+            };
+            client.request::<U256, _>("eth_estimateGas", rpc_params![call]).await
+        }};
+    }
+    macro_rules! assert_estimate_rejected {
+        ($from:expr) => {{
+            let error = estimate!($from).expect_err("estimateGas rejects a denied sender");
+            let jsonrpsee::core::ClientError::Call(error) = error else {
+                panic!("unexpected error: {error:?}")
+            };
+            assert_eq!(error.message(), TX_SENDER_NOT_ALLOWLISTED);
+        }};
+    }
 
     macro_rules! send {
         ($signer:expr, $request:expr) => {{
@@ -267,6 +288,20 @@ async fn test_tx_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
         Some(U256::from(Role::Admin as u8))
     );
 
+    // Gas estimation applies the allowlist the sequencer applies, but `eth_call` stays open to
+    // every sender.
+    assert_estimate_rejected!(user.address());
+    estimate!(admin.address())?;
+    let call = TransactionRequest {
+        from: Some(user.address()),
+        to: Some(TxKind::Call(TX_ALLOWLIST.address)),
+        input: TransactionInput::new(
+            IConduitAllowList::readAllowListCall { addr: user.address() }.abi_encode().into(),
+        ),
+        ..Default::default()
+    };
+    client.request::<Bytes, _>("eth_call", rpc_params![call]).await?;
+
     // Block 3: the unlisted user's transaction is left out; the unlisted deposit is included but
     // only bumps its nonce and keeps its mint.
     let pending = send!(user, request(chain_id, 0, TxKind::Call(FACTORY), Bytes::new()));
@@ -291,6 +326,7 @@ async fn test_tx_allowlist_enforced_on_both_paths() -> eyre::Result<()> {
         send!(admin, request(chain_id, 0, TxKind::Call(TX_ALLOWLIST.address), grant.into()));
     advance!(ctx);
     assert!(receipt!(grant_hash).expect("included").inner.inner.status());
+    estimate!(user.address())?;
     advance!(ctx);
     let included = receipt!(pending).expect("the user's transaction is included once enabled");
     assert!(included.inner.inner.status());
