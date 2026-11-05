@@ -5,13 +5,14 @@ use reth_evm::ConfigureEvm;
 use reth_node_builder::{BuilderContext, NodeTypes, components::PoolBuilder, node::FullNodeTypes};
 use reth_optimism_forks::{OpHardfork, OpHardforks};
 use reth_optimism_node::node::{OpPoolBuilder, OpValidatorWrapper};
-use reth_optimism_primitives::OpPrimitives;
+use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
 use reth_optimism_txpool::{
-    OpPool, OpTransactionPool, OpTransactionValidator, interop_filter::InteropFilterClient,
+    OpPool, OpPooledTransaction, OpPooledTx, OpTransactionPool, OpTransactionValidator,
+    interop_filter::InteropFilterClient,
 };
 use reth_provider::CanonStateSubscriptions;
 use reth_transaction_pool::{
-    Pool, TransactionValidationTaskExecutor, blobstore::DiskFileBlobStore,
+    EthPoolTransaction, Pool, TransactionValidationTaskExecutor, blobstore::DiskFileBlobStore,
 };
 use tracing::{info, warn};
 
@@ -19,20 +20,27 @@ use tracing::{info, warn};
 ///
 /// Upstream's `OpPoolBuilder` does not expose this `PoolConfig` field. Keep the opt-in
 /// construction below aligned with its `build_pool`, including OP maintenance tasks.
-#[derive(Debug, Clone, Default)]
-pub struct ConduitOpPoolBuilder {
+#[derive(Debug, Clone)]
+pub struct ConduitOpPoolBuilder<T = OpPooledTransaction> {
     /// Standard OP settings, including pool overrides and interop configuration.
-    pub inner: OpPoolBuilder,
+    pub inner: OpPoolBuilder<T>,
     /// Trust tracked sender state over older validation snapshots. Reorgs can lower nonces.
     pub enforce_tracked_nonce: bool,
 }
 
-impl<Node, Evm> PoolBuilder<Node, Evm> for ConduitOpPoolBuilder
+impl<T> Default for ConduitOpPoolBuilder<T> {
+    fn default() -> Self {
+        Self { inner: OpPoolBuilder::default(), enforce_tracked_nonce: false }
+    }
+}
+
+impl<Node, Evm, T> PoolBuilder<Node, Evm> for ConduitOpPoolBuilder<T>
 where
     Node: FullNodeTypes<Types: NodeTypes<ChainSpec: OpHardforks, Primitives = OpPrimitives>>,
     Evm: ConfigureEvm<Primitives = OpPrimitives> + Clone + 'static,
+    T: EthPoolTransaction<Consensus = OpTransactionSigned> + OpPooledTx,
 {
-    type Pool = OpTransactionPool<Node::Provider, DiskFileBlobStore, Evm>;
+    type Pool = OpTransactionPool<Node::Provider, DiskFileBlobStore, Evm, T>;
 
     async fn build_pool(
         self,
