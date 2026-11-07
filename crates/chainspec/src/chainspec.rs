@@ -388,6 +388,7 @@ impl ConduitOpChainSpec {
                 migration.last_legacy_block, migration.first_block_base_fee
             );
         }
+        let genesis_timestamp = op_chain_spec.genesis_header().timestamp;
         let excludes_early_rounds = exclude_state_override_from_fork_id(&op_chain_spec);
         let mut state_override_forks = [const { None }; STATE_OVERRIDE_FORKS.len()];
         let mut state_override_fork_activations =
@@ -418,6 +419,16 @@ impl ConduitOpChainSpec {
                 ));
             }
             previous_round = Some((idx, fork, raw.time));
+
+            // The genesis block is never executed, and with `blockTimeAtFork` equal to the chain's
+            // block time the first block looks back to the genesis timestamp, where a round at or
+            // before genesis is already active, so the round could never fire.
+            if raw.time <= genesis_timestamp {
+                return Err(eyre::eyre!(
+                    "{fork} timestamp {} must be after genesis timestamp {genesis_timestamp}",
+                    raw.time
+                ));
+            }
 
             // A zero block time would make the transition check compare the timestamp against
             // itself, so the round could never fire.
@@ -464,7 +475,6 @@ impl ConduitOpChainSpec {
                 }
             }
 
-            let genesis_timestamp = op_chain_spec.genesis_header().timestamp;
             if raw.time <= genesis_timestamp {
                 return Err(eyre::eyre!(
                     "EvmLimitsFork0 timestamp {} must be after genesis timestamp {}",
@@ -926,6 +936,32 @@ mod tests {
                 "unexpected error: {err}",
             );
         }
+    }
+
+    /// A round at or before genesis could never fire: the genesis block is never executed, and the
+    /// first block looks back to the genesis timestamp, where the round is already active.
+    #[test]
+    fn state_override_must_be_after_genesis() {
+        for time in [1499, 1500] {
+            let mut genesis: serde_json::Value =
+                serde_json::from_str(&with_conduit_forks(&[time])).unwrap();
+            genesis["timestamp"] = serde_json::json!("0x5dc");
+
+            let err = try_parse_spec(&serde_json::to_string(&genesis).unwrap())
+                .map(|_| ())
+                .expect_err(&format!("round at {time} should be rejected"));
+            assert!(
+                err.to_string().contains(&format!(
+                    "StateOverrideFork0 timestamp {time} must be after genesis timestamp 1500"
+                )),
+                "{time}: unexpected error: {err}",
+            );
+        }
+
+        let mut genesis: serde_json::Value =
+            serde_json::from_str(&with_conduit_forks(&[1501])).unwrap();
+        genesis["timestamp"] = serde_json::json!("0x5dc");
+        parse_spec(&serde_json::to_string(&genesis).unwrap());
     }
 
     /// Two rounds must produce three distinct fork ID stages, each announcing the next.
