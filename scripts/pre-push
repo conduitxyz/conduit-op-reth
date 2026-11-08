@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 # Git pre-push hook — checks version tags match Cargo.toml.
 # Install: ln -sf ../../scripts/pre-push .git/hooks/pre-push
-exec "$(dirname "$0")/check-tag-version.sh"
+repo_root=$(git rev-parse --show-toplevel) || exit
+exec "$repo_root/scripts/check-tag-version.sh"
