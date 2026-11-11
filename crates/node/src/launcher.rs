@@ -6,6 +6,7 @@
 // to preserve `ConduitOpChainSpec` and `ConduitOpNode` while reusing the same proof-history wiring.
 
 use crate::{
+    call_bundle::BoundedCallBundle,
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
     get_proof_cap::{CappedGetProof, CappedGetProofApiServer, CappedHistoricalGetProof},
@@ -28,7 +29,7 @@ use reth_optimism_rpc::{
     eth::proofs::EthApiExt,
 };
 use reth_optimism_trie::{OpProofsStorage, OpProofsStore, db::MdbxProofsStorage};
-use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
+use reth_rpc_eth_api::{EthApiTypes, EthCallBundleApiServer, helpers::FullEthApi};
 use reth_rpc_server_types::RethRpcModule;
 use reth_tasks::TaskExecutor;
 use std::{sync::Arc, time::Duration};
@@ -76,6 +77,7 @@ pub async fn launch_node(
                 let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
                 install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
                 install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
+                install_call_bundle_bounds(&mut ctx)?;
                 let get_proof = CappedGetProof(ctx.registry.eth_api().clone()).into_rpc();
                 ctx.modules
                     .add_or_replace_if_module_configured(RethRpcModule::Eth, get_proof.clone())?;
@@ -159,6 +161,7 @@ where
             let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
             install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
             install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
+            install_call_bundle_bounds(&mut ctx)?;
 
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
             let api_ext = CappedHistoricalGetProof(EthApiExt::new(
@@ -220,6 +223,18 @@ where
     // Only replace the methods on transports that serve the `eth` namespace.
     ctx.modules.add_or_replace_if_module_configured(RethRpcModule::Eth, ext.into_rpc())?;
     info!(target: "reth::cli", "Flashblocks pending-state RPC overrides installed");
+    Ok(())
+}
+
+/// Replaces reth's `eth_callBundle` with [`BoundedCallBundle`] on transports that serve `eth`.
+fn install_call_bundle_bounds<N, EthApi>(ctx: &mut RpcContext<'_, N, EthApi>) -> eyre::Result<()>
+where
+    N: FullNodeComponents,
+    EthApi: FullEthApi + Clone + Send + Sync + 'static,
+    ErrorObject<'static>: From<<EthApi as EthApiTypes>::Error>,
+{
+    let bundle = BoundedCallBundle::new(ctx.registry.eth_api().clone());
+    ctx.modules.add_or_replace_if_module_configured(RethRpcModule::Eth, bundle.into_rpc())?;
     Ok(())
 }
 

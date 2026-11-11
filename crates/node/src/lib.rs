@@ -1,3 +1,4 @@
+pub mod call_bundle;
 pub mod evm;
 pub mod flashblocks_state;
 pub mod get_proof_cap;
