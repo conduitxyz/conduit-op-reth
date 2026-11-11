@@ -8,6 +8,7 @@
 use crate::{
     chainspec::ConduitOpChainSpec,
     flashblocks_state::{FlashblocksCallApiServer, FlashblocksCallExt, PendingFlashblockState},
+    get_proof_cap::{CappedGetProof, CappedGetProofApiServer, CappedHistoricalGetProof},
     hardforks::{ConduitOpHardfork, ConduitOpHardforks},
     node::ConduitOpNode,
     slipstream::SlipstreamProxy,
@@ -24,7 +25,7 @@ use reth_optimism_node::args::RollupArgs;
 use reth_optimism_rpc::{
     SequencerClient,
     debug::{DebugApiExt, DebugApiOverrideServer},
-    eth::proofs::{EthApiExt, EthApiOverrideServer},
+    eth::proofs::EthApiExt,
 };
 use reth_optimism_trie::{OpProofsStorage, OpProofsStore, db::MdbxProofsStorage};
 use reth_rpc_eth_api::{EthApiTypes, helpers::FullEthApi};
@@ -74,7 +75,12 @@ pub async fn launch_node(
             .extend_rpc_modules(move |mut ctx| {
                 let sequencer_client = ctx.registry.eth_api().sequencer_client().cloned();
                 install_flashblocks_call_overrides(&mut ctx, flashblocks_enabled)?;
-                install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)
+                install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
+                let get_proof = CappedGetProof(ctx.registry.eth_api().clone()).into_rpc();
+                ctx.modules
+                    .add_or_replace_if_module_configured(RethRpcModule::Eth, get_proof.clone())?;
+                ctx.auth_module.replace_auth_methods(get_proof)?;
+                Ok(())
             })
             .launch_with_debug_capabilities()
             .await?;
@@ -155,8 +161,14 @@ where
             install_slipstream_batch_proxy(&mut ctx, slipstream_enabled, sequencer_client)?;
 
             info!(target: "reth::cli", "Installing proofs-history RPC overrides (eth_getProof, debug_executePayload)");
-            let api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
-            let auth_api_ext = EthApiExt::new(ctx.registry.eth_api().clone(), storage.clone());
+            let api_ext = CappedHistoricalGetProof(EthApiExt::new(
+                ctx.registry.eth_api().clone(),
+                storage.clone(),
+            ));
+            let auth_api_ext = CappedHistoricalGetProof(EthApiExt::new(
+                ctx.registry.eth_api().clone(),
+                storage.clone(),
+            ));
             let debug_ext = DebugApiExt::new(
                 ctx.node().provider().clone(),
                 ctx.registry.eth_api().clone(),
