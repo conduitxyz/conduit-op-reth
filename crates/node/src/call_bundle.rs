@@ -9,7 +9,7 @@ use alloy_evm::env::BlockEnvironment;
 use alloy_primitives::{Keccak256, U256, uint};
 use alloy_rpc_types_mev::{EthCallBundle, EthCallBundleResponse, EthCallBundleTransactionResult};
 use jsonrpsee::core::{RpcResult, async_trait};
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_evm::{ConfigureEvm, Evm};
 use reth_provider::BlockReaderIdExt;
 use reth_revm::cancelled::CancelOnDrop;
@@ -25,17 +25,23 @@ use reth_transaction_pool::{
     EthBlobTransactionSidecar, EthPoolTransaction, PoolPooledTx, PoolTransaction, TransactionPool,
 };
 use revm::{
-    DatabaseCommit, DatabaseRef,
-    context::{Block, Cfg},
-    context_interface::result::ResultAndState,
+    DatabaseCommit, DatabaseRef, context::Block, context_interface::result::ResultAndState,
 };
+
+/// The intrinsic gas of the cheapest transaction, a plain transfer.
+const MIN_TRANSACTION_GAS: u64 = 21_000;
 
 /// `eth_callBundle` that bounds its work: the simulation holds a blocking-IO permit, stops at the
 /// next transaction once the request is dropped, and admits each transaction against the gas left
-/// in the block (separate regular and state gas pools under EIP-8037, like the block executor).
+/// in the block.
 ///
 /// UPSTREAM-MIRROR(copy): `reth_rpc::EthBundle::call_bundle` at `op-v2.6.0-2`, with
-/// paradigmxyz/reth#28253 applied.
+/// paradigmxyz/reth#28253 applied. Divergences from #28253:
+/// - Admission follows `alloy_op_evm::OpBlockExecutor` (`op-reth/v2.8.0`) instead of the Ethereum
+///   executor: the full transaction gas limit, not clamped by `tx_gas_limit_cap`, against one pool
+///   charged with each transaction's EVM gas. No OP fork maps to EIP-8037's split pools yet.
+/// - Bundles whose transactions cannot all pay the 21,000 intrinsic gas within the block gas limit
+///   are rejected before any signature is recovered.
 #[derive(Debug)]
 pub struct BoundedCallBundle<Eth> {
     eth_api: Eth,
@@ -87,6 +93,19 @@ where
             return Err(
                 EthApiError::InvalidTransaction(RpcInvalidTransactionError::GasTooHigh).into()
             )
+        }
+
+        // Apply gas limit: default to call gas limit unless user requests a smaller limit
+        let block_gas_limit = gas_limit.unwrap_or(call_gas_limit);
+
+        // Every transaction costs at least the intrinsic 21,000 gas, so reject bundles that cannot
+        // fit before recovering their signers.
+        if (txs.len() as u64).saturating_mul(MIN_TRANSACTION_GAS) > block_gas_limit {
+            return Err(EthApiError::InvalidParams(format!(
+                "bundle of {} transactions exceeds the block gas limit of {block_gas_limit}",
+                txs.len()
+            ))
+            .into())
         }
 
         let transactions = txs
@@ -149,8 +168,6 @@ where
             }
         }
 
-        // Apply gas limit: default to call gas limit unless user requests a smaller limit
-        let block_gas_limit = gas_limit.unwrap_or(call_gas_limit);
         evm_env.block_env.inner_mut().gas_limit = block_gas_limit;
 
         // The bundle is simulated on top of the state block, so default to the next block's base
@@ -186,11 +203,6 @@ where
                 let _permit = permit;
                 let coinbase = evm_env.block_env.beneficiary();
                 let basefee = evm_env.block_env.basefee();
-                let separate_block_gas =
-                    eth_api.provider().chain_spec().is_amsterdam_active_at_timestamp(
-                        evm_env.block_env.timestamp().saturating_to(),
-                    );
-                let tx_gas_limit_cap = evm_env.cfg_env.tx_gas_limit_cap();
 
                 let initial_coinbase = db
                     .basic_ref(coinbase)
@@ -200,8 +212,6 @@ where
                 let mut coinbase_balance_before_tx = initial_coinbase;
                 let mut coinbase_balance_after_tx = initial_coinbase;
                 let mut total_gas_used = 0u64;
-                let mut regular_gas_used = 0u64;
-                let mut state_gas_used = 0u64;
                 let mut total_gas_fees = U256::ZERO;
                 let mut hasher = Keccak256::new();
 
@@ -215,16 +225,9 @@ where
                         return Err(EthApiError::InternalEthError.into())
                     }
 
-                    // Admit each transaction against the gas left in the block, like the block
-                    // executor does: EIP-8037 keeps separate regular and state gas pools.
-                    let regular_limit = tx.gas_limit().min(tx_gas_limit_cap);
-                    let exceeds_block_gas = if separate_block_gas {
-                        regular_limit > block_gas_limit.saturating_sub(regular_gas_used) ||
-                            tx.gas_limit() > block_gas_limit.saturating_sub(state_gas_used)
-                    } else {
-                        regular_limit > block_gas_limit.saturating_sub(total_gas_used)
-                    };
-                    if exceeds_block_gas {
+                    // Admit each transaction against the gas left in the block, like the OP block
+                    // executor does.
+                    if tx.gas_limit() > block_gas_limit.saturating_sub(total_gas_used) {
                         return Err(EthApiError::InvalidParams(format!(
                             "bundle gas exceeds the block gas limit of {block_gas_limit}"
                         ))
@@ -258,8 +261,6 @@ where
                         .expect("fee is always valid; execution succeeded");
                     let gas_used = result.tx_gas_used();
                     total_gas_used += gas_used;
-                    regular_gas_used += result.gas().block_regular_gas_used();
-                    state_gas_used += result.gas().state_gas_spent_final();
 
                     let gas_fees = U256::from(gas_used) * U256::from(gas_price);
                     total_gas_fees += gas_fees;

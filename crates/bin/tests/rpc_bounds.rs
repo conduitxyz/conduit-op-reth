@@ -186,7 +186,7 @@ async fn assert_call_bundle_shares_gas_limit(
         let tx = TransactionRequest {
             nonce: Some(nonce),
             chain_id: Some(chain_id),
-            gas: Some(21_000),
+            gas: Some(30_000),
             max_fee_per_gas: Some(1_000_000_000_000),
             max_priority_fee_per_gas: Some(1_000_000_000),
             to: Some(TxKind::Call(Address::with_last_byte(0xbb))),
@@ -202,20 +202,25 @@ async fn assert_call_bundle_shares_gas_limit(
         ..Default::default()
     };
 
-    // Each transaction fits on its own, but not both together.
-    let err = client
-        .request::<EthCallBundleResponse, _>(
-            "eth_callBundle",
-            rpc_params![EthCallBundle { gas_limit: Some(41_999), ..bundle.clone() }],
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(invalid_params(err), "bundle gas exceeds the block gas limit of 41999");
+    let call = |gas_limit| {
+        let bundle = EthCallBundle { gas_limit: Some(gas_limit), ..bundle.clone() };
+        async move {
+            client.request::<EthCallBundleResponse, _>("eth_callBundle", rpc_params![bundle]).await
+        }
+    };
 
-    let response: EthCallBundleResponse = client
-        .request("eth_callBundle", rpc_params![EthCallBundle { gas_limit: Some(42_000), ..bundle }])
-        .await
-        .expect("bundle fits the gas limit");
+    // Two transactions can't pay 2 * 21,000 intrinsic gas: rejected before simulating.
+    let err = call(41_999).await.unwrap_err();
+    assert_eq!(
+        invalid_params(err),
+        "bundle of 2 transactions exceeds the block gas limit of 41999"
+    );
+
+    // Each transfer uses 21,000 of its 30,000 gas limit, leaving 29,999 for the second.
+    let err = call(50_999).await.unwrap_err();
+    assert_eq!(invalid_params(err), "bundle gas exceeds the block gas limit of 50999");
+
+    let response = call(51_000).await.expect("bundle fits the gas limit");
     assert_eq!(response.total_gas_used, 42_000);
 }
 
