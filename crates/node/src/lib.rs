@@ -1,5 +1,6 @@
 pub mod evm;
 pub mod flashblocks_state;
+pub mod get_proof_cap;
 pub mod launcher;
 pub mod node;
 pub mod pool;
