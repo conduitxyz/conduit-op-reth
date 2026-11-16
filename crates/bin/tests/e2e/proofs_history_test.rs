@@ -1,15 +1,13 @@
 //! In-process e2e tests for the proofs-history ExEx across a `StateOverrideFork0`
 //! activation, using the same deterministic engine-driven harness as the other e2e tests.
-//! Both proofs storage schemas (v1 and v2) are covered, mirroring upstream's `live.rs`
-//! test matrix.
+//! Uses the supported v2 proofs storage schema.
 //!
 //! Upgrade tripwires encoded here:
 //! - the ExEx must ingest the fork-transition block, and with verification interval 1 it
 //!   re-executes every block via the node's EVM config — if proof replay ever stops using
 //!   `ConduitOpEvmConfig`, the transition block diverges and proofs are never served,
 //! - `eth_getProof` (served from the proofs storage through the RPC override module) must reflect
-//!   the override after the fork and the account's absence before it, identically on both storage
-//!   schemas.
+//!   the override after the fork and the account's absence before it.
 
 use crate::e2e::{
     FORK_ACTIVATION_TIMESTAMP, STORAGE_SLOT_1, TARGET_BYTECODE, advance,
@@ -118,11 +116,6 @@ macro_rules! proofs_history_scenario {
 }
 
 #[tokio::test]
-async fn test_proofs_history_tracks_state_override_fork_v1() -> eyre::Result<()> {
-    proofs_history_scenario!(reth_optimism_trie::db::MdbxProofsStorage)
-}
-
-#[tokio::test]
 async fn test_proofs_history_tracks_state_override_fork_v2() -> eyre::Result<()> {
-    proofs_history_scenario!(reth_optimism_trie::db::MdbxProofsStorageV2)
+    proofs_history_scenario!(reth_optimism_trie::db::MdbxProofsStorage)
 }

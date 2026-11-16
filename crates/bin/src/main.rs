@@ -32,6 +32,13 @@ struct ConduitRollupArgs {
     #[arg(long = "conduit.slipstream")]
     slipstream: bool,
 
+    /// Enforce the pool's tracked sender nonce over older validation snapshots.
+    ///
+    /// Disabled by default. A reorg can lower the canonical nonce, causing valid transactions
+    /// to be rejected until tracked sender state is refreshed. OP sequencers can also reorg.
+    #[arg(long = "txpool.enforce-tracked-nonce")]
+    enforce_tracked_nonce: bool,
+
     /// Forward historical RPC requests below this block, overriding genesis migrationBlock or
     /// Bedrock. The cutoff block itself is served locally; does not change the chain's
     /// hardforks.
@@ -47,6 +54,13 @@ fn main() {
 
     // Initialize conduit-op-reth version metadata before CLI parsing
     init_conduit_version().expect("Failed to initialize conduit-op-reth version metadata");
+
+    // Match op-reth: masked state persistence is not supported for OP nodes. The launcher
+    // also rejects a nonzero effective window supplied explicitly by an operator.
+    reth_node_core::args::DefaultEngineValues::default()
+        .with_num_state_masking_blocks(0)
+        .try_init()
+        .expect("engine defaults must be initialized before CLI parsing");
 
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe {
@@ -67,8 +81,14 @@ fn main() {
         |builder: WithLaunchContext<NodeBuilder<DatabaseEnv, ConduitOpChainSpec>>,
          args: ConduitRollupArgs| async move {
             info!(target: "reth::cli", "Launching conduit-op-reth node");
-            launcher::launch_node(builder, args.rollup, args.slipstream, args.historical_rpc_block)
-                .await
+            launcher::launch_node(
+                builder,
+                args.rollup,
+                args.slipstream,
+                args.historical_rpc_block,
+                args.enforce_tracked_nonce,
+            )
+            .await
         },
     ) {
         eprintln!("Error: {err:?}");
@@ -86,6 +106,22 @@ mod tests {
         DefaultRpcModuleValidator,
         ConduitSubCommand,
     >;
+
+    #[test]
+    fn tracked_nonce_enforcement_is_opt_in() {
+        for enabled in [false, true] {
+            let mut args = vec!["conduit-op-reth", "node"];
+            if enabled {
+                args.push("--txpool.enforce-tracked-nonce");
+            }
+            let reth_ethereum_cli::Commands::Node(command) =
+                ConduitCli::try_parse_from(args).unwrap().command
+            else {
+                panic!("expected node command")
+            };
+            assert_eq!(command.ext.enforce_tracked_nonce, enabled);
+        }
+    }
 
     #[test]
     fn historical_rpc_block_flag() {
@@ -194,10 +230,21 @@ mod tests {
             "--proofs-history.verification-interval",
             "1",
             "--proofs-history.storage-version",
-            "v1",
+            "v2",
         ];
         <ConduitCli as clap::Parser>::try_parse_from(node_args)
             .expect("node proofs-history flags must parse");
+
+        for command in [vec!["node"], vec!["proofs", "init"]] {
+            let error = ConduitCli::try_parse_from(
+                ["conduit-op-reth"]
+                    .into_iter()
+                    .chain(command)
+                    .chain(["--proofs-history.storage-version", "v1"]),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("only `v2` is supported"));
+        }
     }
 
     #[test]

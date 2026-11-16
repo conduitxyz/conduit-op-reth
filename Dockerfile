@@ -4,11 +4,11 @@
 ARG FEATURES
 ARG BUILD_PROFILE=maxperf
 
-FROM rust:1.95 AS base
+FROM rust:1.95-trixie AS base
 ARG TARGETPLATFORM
 
 RUN apt-get update \
-    && apt-get install -y clang libclang-dev libtss2-dev zlib1g-dev
+    && apt-get satisfy -y 'ca-certificates (>= 20250419+deb13u1), clang, libclang-dev, libtss2-dev, zlib1g-dev'
 
 RUN rustup component add clippy rustfmt
 
@@ -78,7 +78,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Runtime container
 #
 FROM debian:13-slim AS conduit-op-reth-runtime
-RUN apt update && apt install -y curl jq && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get satisfy -y 'ca-certificates (>= 20250419+deb13u1), curl, jq' \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ARG BUILD_PROFILE=maxperf
 COPY --from=conduit-op-reth-build /app/target/$BUILD_PROFILE/conduit-op-reth /app/conduit-op-reth

@@ -21,3 +21,8 @@ reth-primitives-traits.workspace = true
 eyre.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+op-alloy-consensus.workspace = true
+reth-consensus.workspace = true
+reth-optimism-consensus.workspace = true
