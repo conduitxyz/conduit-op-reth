@@ -14,9 +14,27 @@ if [ "$SYNCING" = "false" ]; then
   exit 0
 fi
 
+# reth reports highestBlock equal to currentBlock while it syncs, so the sync target is
+# taken as the furthest of highestBlock and the stage checkpoints (Headers runs ahead).
 CURRENT=$(echo "$RESULT" | jq -r '.result.currentBlock')
-HIGHEST=$(echo "$RESULT" | jq -r '.result.highestBlock')
-LAG=$(( 16#${HIGHEST#0x} - 16#${CURRENT#0x} ))
+TARGETS=$(echo "$RESULT" | jq -r '.result.highestBlock, (.result.stages[]?.block)')
+if [[ ! "$CURRENT" =~ ^0x[0-9a-fA-F]+$ ]]; then
+  echo "Unexpected eth_syncing response: $RESULT"
+  exit 1
+fi
+CURRENT=$(( 16#${CURRENT#0x} ))
+HIGHEST=$CURRENT
+for TARGET in $TARGETS; do
+  [[ "$TARGET" =~ ^0x[0-9a-fA-F]+$ ]] || continue
+  TARGET=$(( 16#${TARGET#0x} ))
+  [ "$TARGET" -gt "$HIGHEST" ] && HIGHEST=$TARGET
+done
+
+if [ "$HIGHEST" -le "$CURRENT" ]; then
+  echo "Node is syncing, but reports no target ahead of block ${CURRENT}; lag is unknown."
+  exit 1
+fi
+LAG=$(( HIGHEST - CURRENT ))
 
 if [ "$LAG" -lt "$ALLOWED_LAG" ]; then
   echo "Node is syncing, but within allowed lag of ${ALLOWED_LAG} blocks."
